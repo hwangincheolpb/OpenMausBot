@@ -51,6 +51,17 @@ import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 
 
 const mode = process.env.FAKE_CODEX_MODE ?? "happy";
 
+// Follow the spawning server down. A suite that SIGTERMs its server can
+// exit before every adapter has disposed its child; a fake parked in a
+// keep-alive mode would then outlive the run (19 did after one failover
+// pass). Reparenting to launchd/init is the signal. Inline on purpose: fakes
+// stay dependency-free and one is copied out of the repo.
+{
+  const spawner = process.ppid;
+  const orphanWatch = setInterval(() => { if (process.ppid !== spawner) process.exit(0); }, 500);
+  orphanWatch.unref();
+}
+
 // stdout and stderr are separate pipes: the writer cannot order them for
 // the reader, and a fixed sleep only pretends to. These knobs synchronize
 // on the test instead — it watches the driver consume the earlier stream
