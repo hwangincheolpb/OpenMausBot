@@ -434,6 +434,15 @@ const appConfigSchema = z.object({
   browserEngine: browserEngineConfigSchema.optional(),
   browserProfiles: browserProfilesSchema.optional(),
   instances: instanceConfigMapSchema.optional(),
+  /** Explicit routing consent: an absent policy never changes providers. */
+  modelFailover: z.object({
+    enabled: z.boolean(),
+    maxAttempts: z.number().int().min(1).max(3).optional(),
+    candidates: z.array(z.object({
+      instanceId: z.string().trim().min(1).max(160),
+      model: z.string().trim().min(1).max(256),
+    }).strict()).max(8),
+  }).strict().optional(),
   /** User-configured MCP servers, mounted into every capable engine. Kept
    * loosely typed HERE on purpose: parseStoredConfig throws away the whole
    * file on a schema error, and one bad server entry must degrade to a
@@ -487,6 +496,8 @@ export interface AppConfig {
    * attaches to it instead of agent-browser spawning its own (#1396). */
   browserEngine?: { attachCdpUrl?: string };
   instances?: InstanceConfigMap;
+  /** Ordered, explicitly allowed alternatives. maxAttempts includes the original. */
+  modelFailover?: { enabled: boolean; maxAttempts?: number; candidates: ModelSelection[] };
 }
 export type BrowserProfile = z.output<typeof browserProfileSchema> & {
   /** Exact durable Electron partition inherited from #567. Internal and
@@ -945,6 +956,7 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   if (checkedPatch.defaultModelSelection !== undefined) {
     disk.defaultModelSelection = checkedPatch.defaultModelSelection;
   }
+  if (checkedPatch.modelFailover !== undefined) disk.modelFailover = checkedPatch.modelFailover;
   if (checkedPatch.cliStartup !== undefined) disk.cliStartup = checkedPatch.cliStartup;
   // Custom MCP mutations go through their own dedicated local API, but
   // saveConfig remains the single atomic persistence boundary.

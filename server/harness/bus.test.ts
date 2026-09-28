@@ -38,6 +38,24 @@ describe("EventBus", () => {
     ensureDirs();
   });
 
+  it("logs held failures but releases them to all subscribers only when decided", () => {
+    const bus = new EventBus();
+    const first = vi.fn();
+    const second = vi.fn();
+    const failure = testEvent({ type: "turn.completed", ok: false, stopReason: "auth_required" });
+    bus.subscribe(first);
+    bus.subscribe(second);
+    bus.setDeliveryGate(() => false);
+    bus.publish(failure);
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+    expect(readFileSync(join(EVENTS_DIR, "thread-1.ndjson"), "utf8").trim().split("\n")).toHaveLength(1);
+    bus.release(failure);
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledOnce();
+    expect(readFileSync(join(EVENTS_DIR, "thread-1.ndjson"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
   it("stamps events from an attached adapter with the instanceId", async () => {
     const { instance, emit } = await liveInstance();
     const bus = new EventBus();

@@ -969,6 +969,16 @@ describe("credential env preference", () => {
     expect(loadConfig().instances).toEqual(existing.instances);
   });
 
+  it("persists and replaces the entire opt-in model failover policy", () => {
+    const policy = { enabled: true, maxAttempts: 2, candidates: [{ instanceId: "codex", model: "fixture-model" }] };
+    saveConfig({ modelFailover: policy });
+    expect(loadConfig().modelFailover).toEqual(policy);
+    saveConfig({ profile: { name: "Fixture" } });
+    expect(loadConfig().modelFailover).toEqual(policy);
+    saveConfig({ modelFailover: { enabled: false, candidates: [] } });
+    expect(loadConfig().modelFailover).toEqual({ enabled: false, candidates: [] });
+  });
+
   it("replaces instance membership and known settings while preserving retained extension fields", () => {
     const path = join(DATA_DIR, "config.json");
     writeFileSync(path, JSON.stringify({

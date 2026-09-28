@@ -50,6 +50,7 @@ Use only mapped, tested commands:
 - [In-chat team coordination](room-coordination.md)
 - [Chief access to additional teams](team-access.md)
 - [Engines and Doctor](engines.md)
+- [Automatic model failover](model-failover.md)
 - [Claude coordination and turn-scoped tools](claude-tool-lifecycle.md)
 - [Codex bot instructions](codex-instructions.md)
 - [Codex helper event isolation](codex-helpers.md)

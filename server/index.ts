@@ -166,6 +166,7 @@ import {
   newId,
 } from "./contracts.ts";
 import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
+import { availableFailoverCandidate, ModelFailoverAttempt, modelFailoverReason, selectionKey } from "./model-failover.ts";
 import { decodeGeneratedImage } from "./generated-image.ts";
 import {
   MAX_MCP_SERVERS,
@@ -941,6 +942,70 @@ type DirectTurnOutcome = { ok: boolean; text: string };
 const directFollowupTurns = new ProviderTurnGenerationRegistry<DirectTurnOutcome>();
 const directFollowupSettlers = new Map<string, { threadId: string; settle?: () => void }>();
 const directCoordinationSettlers = new Map<string, (outcome: DirectTurnOutcome) => void>();
+type ModelFailoverChain = { attempts: number; visited: Set<string> };
+type DirectModelFailover = {
+  generation: string;
+  instanceId: string;
+  attempt: ModelFailoverAttempt;
+  turnId?: string;
+  pending?: boolean;
+  cancelled?: boolean;
+  terminal?: Extract<RuntimeEvent, { type: "turn.completed" }>;
+  retry: () => Promise<void>;
+};
+const directModelFailovers = new Map<string, DirectModelFailover>();
+const failedModelSelections = new Map<string, number>();
+
+/** A held provider failure still costs what the provider actually reports.
+ * Only call once a replacement was selected: otherwise the regular terminal
+ * fold owns accounting. Null/zero reports never manufacture a charge. */
+function recordFailedModelAttemptUsage(bot: BotRecord, threadId: string, selection: ModelSelection,
+  event: Extract<RuntimeEvent, { type: "turn.completed" }>): boolean {
+  const tokens = event.usage ?? turnUsage.get(threadId);
+  if (!(tokens?.input || tokens?.output || tokens?.cachedInput || (event.cost ?? 0) > 0)) return false;
+  const task = store.taskByThread(bot.id, threadId);
+  if (task) store.addTaskUsage(bot.id, threadId, {
+    input: tokens?.input, output: tokens?.output, cachedInput: tokens?.cachedInput, costUsd: event.cost ?? null,
+  });
+  const run = routines?.runForThread(threadId);
+  appendUsage(DATA_DIR, {
+    botId: bot.id, botName: bot.name, threadId,
+    instanceId: selection.instanceId,
+    driverKind: registry.get(selection.instanceId)?.driverKind ?? "unknown",
+    model: selection.model,
+    input: tokens?.input ?? 0, output: tokens?.output ?? 0,
+    ...(typeof tokens?.cachedInput === "number" ? { cachedInput: tokens.cachedInput } : {}),
+    costUsd: event.cost ?? null,
+    trigger: run ? { kind: "routine", routineId: run.routineId, label: run.routineName }
+      : isInternalTurn(threadId) ? { kind: "bot", ...(task?.openedBy?.botId ? { botId: task.openedBy.botId } : {}) }
+      : turnTriggers.get(threadId) ?? { kind: "owner" },
+  });
+  noteSpend(DATA_DIR, event.cost ?? null);
+  return true;
+}
+
+function releaseFailoverFailure(state: DirectModelFailover) {
+  if (!state.terminal) return;
+  const threadId = state.terminal.threadId;
+  if (directModelFailovers.get(threadId) !== state) return;
+  directModelFailovers.delete(threadId);
+  for (const event of state.attempt.takeBuffered()) bus.release(event);
+  bus.release(state.terminal);
+}
+
+function cancelModelFailover(threadId: string) {
+  const state = directModelFailovers.get(threadId);
+  if (!state) return;
+  state.cancelled = true;
+  state.attempt.unsafe = true;
+  if (state.pending && state.terminal) {
+    // The provider already ended: Stop must settle the held logical turn
+    // immediately, rather than wait for a candidate's account probe.
+    directModelFailovers.delete(threadId);
+    state.attempt.takeBuffered();
+    bus.release({ ...state.terminal, ok: false, stopReason: "interrupted" });
+  }
+}
 function settleDirectCoordination(generation: string | undefined, outcome: DirectTurnOutcome) {
   if (!generation) return;
   roomHandoffs.sourceSettled(generation, outcome.ok);
@@ -1198,6 +1263,7 @@ function clearDirectTurnDispatch(threadId: string, claimId: string): void {
 function cancelDirectTurnDispatch(botId: string, expectedThreadId?: string): DirectTurnDispatchClaim | null {
   const threadId = expectedThreadId ?? store.bot(botId)?.threadId;
   if (!threadId) return null;
+  cancelModelFailover(threadId);
   cancelTeamSetupResumesForThread(threadId);
   const claim = directTurnDispatchClaims.get(threadId);
   if (!claim || claim.botId !== botId) return null;
@@ -1875,6 +1941,7 @@ const approvalModeForTurn = (bot: BotRecord, peerInitiated = false): ApprovalMod
 /** Full belongs to the requesting conversation, not whichever sibling is
  * selected in the UI or the bot's default for future conversations. */
 function fullAccessForSource(botId: string, threadId: string): boolean {
+  if (groupTurnModelOverrides.get(threadId)?.botId === botId) return false;
   const owner = connectorThread(botId, threadId);
   if (!owner) return false;
   const bot = store.projectBotForTask(botId, threadId) ?? owner.bot;
@@ -3023,6 +3090,12 @@ function cancelGroupTurnOperations(
   },
 ) {
   cancelTeamSetupResumesForThread(threadId);
+  const failover = groupModelFailovers.get(threadId);
+  if (failover) {
+    failover.cancelled = true;
+    failover.attempt.unsafe = true;
+    if (failover.pending) releaseGroupFailoverFailure(threadId, failover, true);
+  }
   roomHandoffs.cancelRoom(groupId, threadId);
   for (const operation of groupTurnOperations.get(groupId) ?? []) {
     if (operation.threadId !== threadId) continue;
@@ -3424,6 +3497,57 @@ function notify(notification: Notification | null) {
 // Group threads: the fold needs to know WHO is talking — the turn engine
 // records the active member here before dispatching its turn.
 const groupSpeakers = new Map<string, { botId: string; name: string; color: string }>();
+// Provider switching is confined to one room attempt; persisted bot defaults
+// and grants remain unchanged. The fold reads this projection for Ask and spend.
+const groupTurnModelOverrides = new Map<string, { botId: string; selection: BotRecord["modelSelection"] }>();
+type GroupModelFailoverState = {
+  instanceId: string;
+  generation: string;
+  attempt: ModelFailoverAttempt;
+  turnId?: string;
+  pending?: boolean;
+  cancelled?: boolean;
+  terminal?: Extract<RuntimeEvent, { type: "turn.completed" }>;
+  retry: () => Promise<void>;
+};
+const groupModelFailovers = new Map<string, GroupModelFailoverState>();
+function projectGroupTurnBot(threadId: string, bot: BotRecord | null | undefined): BotRecord | undefined {
+  const override = groupTurnModelOverrides.get(threadId);
+  return bot && override?.botId === bot.id
+    ? { ...bot, modelSelection: override.selection, approvalMode: "ask", autoApprove: false, alwaysAllow: [] }
+    : bot ?? undefined;
+}
+function releaseGroupFailoverFailure(threadId: string, state: GroupModelFailoverState, interrupted = false): void {
+  if (groupModelFailovers.get(threadId) !== state || !state.terminal) return;
+  groupModelFailovers.delete(threadId);
+  if (!interrupted) for (const event of state.attempt.takeBuffered()) bus.release(event);
+  else state.attempt.takeBuffered();
+  bus.release(interrupted ? { ...state.terminal, ok: false, stopReason: "interrupted" } : state.terminal);
+}
+/** Runs before every subscriber, including routines and private goal output. */
+function groupModelFailoverGate(event: RuntimeEvent): boolean | undefined {
+  const state = groupModelFailovers.get(event.threadId);
+  if (!state || event.providerInstanceId !== state.instanceId) return undefined;
+  if (shouldIgnoreProviderEvent(event)) return false;
+  if (activeInternalGenerationByThread.get(event.threadId) !== state.generation) return undefined;
+  if (state.turnId && event.turnId && event.turnId !== state.turnId) return undefined;
+  if (event.turnId) state.turnId ??= event.turnId;
+  if (state.pending) return false;
+  const decision = state.attempt.observe(event);
+  if (decision === "hold") return false;
+  if (decision === "retry" && event.type === "turn.completed" && !state.cancelled) {
+    state.pending = true;
+    state.terminal = event;
+    void state.retry().catch(() => releaseGroupFailoverFailure(event.threadId, state));
+    return false;
+  }
+  if (state.attempt.unsafe || event.type === "turn.completed") {
+    for (const held of state.attempt.takeBuffered()) bus.release(held);
+  }
+  if (event.type === "turn.completed") groupModelFailovers.delete(event.threadId);
+  return true;
+}
+
 
 // The latest running token totals for the turn in flight on each thread.
 // Providers report cumulative-within-turn numbers; the final value is folded
@@ -3545,6 +3669,35 @@ const watchdog = new TurnWatchdog({
   },
 });
 watchdog.start();
+
+// Gate before every subscriber (routines, Chief incidents, approvals, SSE,
+// coordination and queues). Only the final outcome settles a logical turn.
+bus.setDeliveryGate(event => {
+  const groupDecision = groupModelFailoverGate(event);
+  if (groupDecision !== undefined) return groupDecision;
+  const state = directModelFailovers.get(event.threadId);
+  if (!state || event.providerInstanceId !== state.instanceId) return true;
+  if (shouldIgnoreProviderEvent(event)) return false;
+  if (state.generation !== directTurnGenerationByThread.get(event.threadId)) return true;
+  if (state.turnId && event.turnId && event.turnId !== state.turnId) return true;
+  if (event.turnId) state.turnId ??= event.turnId;
+  if (state.pending) return false;
+  const decision = state.attempt.observe(event);
+  if (decision === "hold") return false;
+  if (decision === "retry" && event.type === "turn.completed" && !state.cancelled) {
+    state.pending = true;
+    state.terminal = event;
+    // Keep delivery synchronous; the task remains busy while account probes
+    // run. Stop invalidates this exact state before any replacement starts.
+    void state.retry().catch(() => releaseFailoverFailure(state));
+    return false;
+  }
+  if (state.attempt.unsafe || event.type === "turn.completed") {
+    for (const held of state.attempt.takeBuffered()) bus.release(held);
+  }
+  if (event.type === "turn.completed") directModelFailovers.delete(event.threadId);
+  return true;
+});
 
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
@@ -4372,9 +4525,9 @@ bus.subscribe((event: RuntimeEvent) => {
       // OpenMausBot decides nothing about the action itself. Only Full access
       // answers, because that is exactly what the person granted. A QUESTION
       // always reaches the human — even Full access never invents an answer.
-      const asker = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
+      const asker = bot ?? (speaker ? projectGroupTurnBot(event.threadId, store.bot(speaker.botId)) : undefined);
       const unattended = permission && asker && event.requestId ? isUnattended(asker.id, event.threadId) : false;
-      const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId)) : "ask";
+      const effectiveApprovalMode = groupTurnModelOverrides.has(event.threadId) ? "ask" : asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId)) : "ask";
       const verdict = permission && asker && event.requestId
         ? autoVerdict(effectiveApprovalMode, event.tool, { requiresExplicitApproval: event.requiresExplicitApproval })
         : null;
@@ -4735,7 +4888,7 @@ bus.subscribe((event: RuntimeEvent) => {
         // Room/goal turns run on a shared thread, but their spend still counts
         // against the workspace cap and the ledger. Book it under the speaker.
         const tokens = event.usage ?? lastReported;
-        const speakingBot = store.bot(speaker.botId);
+        const speakingBot = projectGroupTurnBot(event.threadId, store.bot(speaker.botId));
         const selection = speakingBot?.modelSelection;
         appendUsage(DATA_DIR, {
           botId: speaker.botId,
@@ -5644,6 +5797,8 @@ async function startTurn(
     /** Queue receipts outlive the dispatch acknowledgment until this exact turn settles. */
     onTurnSettled?: () => void;
     coordination?: { id: string; resumed: boolean; settle: (outcome: { ok: boolean; text: string }) => void };
+    /** Internal logical-turn state; never admitted from an HTTP body. */
+    modelFailoverChain?: ModelFailoverChain;
   },
 ) {
   workspaceMaintenance.assertAvailable();
@@ -5964,6 +6119,8 @@ async function startTurn(
   // in the background — box provisioning can take ~90s and must never
   // hang the HTTP request
   const dispatchClaimId = randomUUID();
+  let markFailoverDispatchReady!: () => void;
+  const failoverDispatchReady = new Promise<void>(resolve => { markFailoverDispatchReady = resolve; });
   const resourceOwner = { threadId, generation: dispatchClaimId };
   turnResourceOwners.set(threadId, resourceOwner);
   directTurnGenerationByThread.set(threadId, dispatchClaimId);
@@ -5992,6 +6149,113 @@ async function startTurn(
   if (commsDepth === 0) store.patchTask(bot.id, threadId, { unread: false });
   turnUsage.delete(threadId);
   turnContext.delete(threadId);
+
+  const failoverPolicy = cfg.modelFailover;
+  const failoverChain = opts?.modelFailoverChain ?? { attempts: 1, visited: new Set([selectionKey(bot.modelSelection)]) };
+  if (failoverPolicy?.enabled && failoverChain.attempts < (failoverPolicy.maxAttempts ?? 2) &&
+    failoverPolicy.candidates.length && opts?.runOn !== "cloud" && instance.driverKind !== "boxAgent" &&
+    instanceId === bot.modelSelection.instanceId && !managedDesktop.owns(instanceId)) {
+    const state: DirectModelFailover = {
+      generation: dispatchClaimId, instanceId, attempt: new ModelFailoverAttempt(),
+      retry: async () => {
+        // An adapter may emit failure before sendTurn's ACK. Its old dispatch
+        // continuation must finish before a new generation changes the task.
+        await failoverDispatchReady;
+        const active = () => directModelFailovers.get(threadId) === state && !state.cancelled &&
+          directTurnGenerationByThread.get(threadId) === dispatchClaimId &&
+          Boolean(store.taskByThread(bot.id, threadId)?.busy) &&
+          !providerFleetReloading && cfg.modelFailover?.enabled === true &&
+          (Boolean(opts?.cardContinuation) || store.activePath(threadId).some(message =>
+            message.id === userMessage.id && message.text === userMessage.text));
+        if (!active()) { releaseFailoverFailure(state); return; }
+        // Failed auth can still be cached as healthy by a CLI. Do not send
+        // another bot to that known-bad selection during this cooldown.
+        const failureReason = modelFailoverReason([...state.attempt.errors, state.terminal?.stopReason ?? ""].join("\n"));
+        const failedKey = selectionKey({ ...bot.modelSelection, model: failureReason === "auth" || failureReason === "quota" ? "*" : bot.modelSelection.model });
+        failedModelSelections.set(failedKey, Date.now() + 60_000);
+        if (failedModelSelections.size > 256) {
+          for (const [key, until] of failedModelSelections) if (until <= Date.now()) failedModelSelections.delete(key);
+          while (failedModelSelections.size > 256) failedModelSelections.delete(failedModelSelections.keys().next().value!);
+        }
+        const candidate = await availableFailoverCandidate({
+          candidates: cfg.modelFailover!.candidates,
+          visited: failoverChain.visited,
+          get: id => registry.get(id),
+          excluded: id => providerInstancesChanging.has(id) || managedDesktop.owns(id),
+          failedUntil: failedModelSelections,
+          active,
+          needsImages: resolvedImages.images.length > 0,
+        });
+        if (!candidate || !active()) { releaseFailoverFailure(state); return; }
+        const currentTask = store.taskByThread(bot.id, threadId);
+        if (!currentTask || providerInstancesChanging.has(instanceId)) { releaseFailoverFailure(state); return; }
+        // Start a fresh target session with the active transcript, including
+        // when the alternative is a different model on the same engine.
+        if (!store.switchTaskModel(bot.id, threadId, candidate, false, true, { rewound: true })) {
+          releaseFailoverFailure(state); return;
+        }
+        if (state.terminal && recordFailedModelAttemptUsage(bot, threadId, bot.modelSelection, state.terminal)) {
+          // A replacement admission failure may release this terminal after
+          // all. Its positive usage has already been booked exactly once.
+          state.terminal = { ...state.terminal, cost: null, usage: { input: 0, output: 0 } };
+        }
+        directModelFailovers.delete(threadId);
+        if (state.turnId) retireProviderTurn(state.turnId);
+        for (const id of directFollowupTurns.deleteGeneration(threadId, dispatchClaimId)) retireProviderTurn(id);
+        directFollowupSettlers.delete(dispatchClaimId);
+        directCoordinationSettlers.delete(dispatchClaimId);
+        handoffs.abandon(threadId, dispatchClaimId);
+        revokeInternalCapabilityGeneration(threadId, dispatchClaimId);
+        clearDirectTurnDispatch(threadId, dispatchClaimId);
+        clearCancelledProviderHandshake(threadId, `direct:${dispatchClaimId}`);
+        stopScreenPoller(bot.id, threadId);
+        releaseTurnResources(resourceOwner);
+        releaseLocalVmThread(threadId);
+        vpsThreadEnded(bot.id, threadId);
+        watchdog.settle(threadId);
+        runningTurnEngines.delete(threadId);
+        directTurnBots.delete(threadId);
+        computerSelectionTurns.delete(threadId);
+        turnUsage.delete(threadId);
+        turnContext.delete(threadId);
+        // No await from releasing busy to acquiring the replacement claim.
+        store.setTaskActivity(bot.id, threadId, "idle");
+        try {
+          await startTurn(bot.id, text, {
+            ...opts, editedMessageId: undefined, userMessage, threadId,
+            modelFailoverChain: {
+              attempts: failoverChain.attempts + 1,
+              visited: new Set([...failoverChain.visited, selectionKey(candidate)]),
+            },
+          });
+          store.appendMessage(threadId, {
+            role: "bot", kind: "activity",
+            tool: { name: `Model unavailable — switched to ${candidate.instanceId} / ${candidate.model} (attempt ${failoverChain.attempts + 1}/${failoverPolicy.maxAttempts ?? 2})`, ok: true },
+          });
+        } catch (error) {
+          // Admission can still fail (for example a spend cap changed during
+          // the probe). Release the original outcome through its normal owner.
+          store.switchTaskModel(bot.id, threadId, bot.modelSelection, false, true);
+          directModelFailovers.set(threadId, state);
+          directTurnBots.set(threadId, bot);
+          directFollowupSettlers.set(dispatchClaimId, { threadId, settle: opts?.onTurnSettled });
+          if (opts?.coordination) directCoordinationSettlers.set(dispatchClaimId, opts.coordination.settle);
+          // Its original provider id is retired. Releasing a terminal under a
+          // new control-plane id lets the ordinary fold close this task.
+          const failedTurnId = `failover-admission-${dispatchClaimId}`;
+          state.attempt.buffered = state.attempt.buffered.map(event => ({ ...event, turnId: failedTurnId }));
+          if (state.terminal) state.terminal = { ...state.terminal, turnId: failedTurnId };
+          // The retired failed turn cannot own callbacks again; this bounded
+          // admission failure settles those callbacks explicitly once.
+          settleDirectCoordination(dispatchClaimId, { ok: false, text: error instanceof Error ? error.message : String(error) });
+          settleDirectFollowup(dispatchClaimId);
+          releaseFailoverFailure(state);
+          opts?.onDispatchError?.(error instanceof Error ? error.message : String(error));
+        }
+      },
+    };
+    directModelFailovers.set(threadId, state);
+  }
 
   void (async () => {
     try {
@@ -6703,6 +6967,25 @@ async function startTurn(
         drainDelegationWakes();
       }
     } catch (e) {
+      markFailoverDispatchReady();
+      const failover = directModelFailovers.get(threadId);
+      if (failover?.generation === dispatchClaimId && e instanceof DirectTurnSetupCancelled) {
+        directModelFailovers.delete(threadId);
+        failover.attempt.takeBuffered();
+      }
+      if (failover?.generation === dispatchClaimId && !(e instanceof DirectTurnSetupCancelled)) {
+        if (failover.pending) return;
+        if (!failover.cancelled && !failover.attempt.unsafe && modelFailoverReason(e instanceof Error ? e.message : String(e))) {
+          const turnId = failover.turnId ?? `dispatch-${dispatchClaimId}`;
+          directFollowupTurns.bind(threadId, dispatchClaimId, turnId);
+          const base = { provider: instance.driverKind, providerInstanceId: instanceId, threadId, turnId, createdAt: new Date().toISOString() };
+          bus.publish({ ...base, eventId: newId(), type: "runtime.error", message: e instanceof Error ? e.message : String(e), setup: true });
+          bus.publish({ ...base, eventId: newId(), type: "turn.completed", ok: false, stopReason: e instanceof Error ? e.message : String(e) });
+          return;
+        }
+        directModelFailovers.delete(threadId);
+        for (const held of failover.attempt.takeBuffered()) bus.release(held);
+      }
       handoffs.abandon(threadId, dispatchClaimId);
       if (computerSelectionTurns.get(threadId)?.generation === dispatchClaimId) computerSelectionTurns.delete(threadId);
       settleDirectFollowup(dispatchClaimId);
@@ -6768,6 +7051,8 @@ async function startTurn(
       drainSecretResumes();
       drainTeamSetupResumes();
       drainDelegationWakes();
+    } finally {
+      markFailoverDispatchReady();
     }
   })();
   return userMessage;
@@ -7712,6 +7997,7 @@ const MAX_GROUP_HOPS = 1;
 type GroupMemberTurnOutcome =
   | "settled"
   | "provider_failed"
+  | "retry_model"
   | "dispatch_failed"
   | "spend_capped"
   | "stalled"
@@ -7725,8 +8011,10 @@ type GroupTurnOrchestration = {
   systemInstructions: string;
   turnInstructions?: string;
   followMentions: boolean;
-  result: { replyText?: string; outcome?: GroupMemberTurnOutcome; stopReason?: string | null };
+  result: { replyText?: string; outcome?: GroupMemberTurnOutcome; stopReason?: string | null; failoverHandled?: boolean };
   onClaimed?: () => void;
+  canRetryModel?: () => boolean;
+  onModelRetry?: () => void;
   onTurnStarted?: (turnId: string) => void;
 };
 
@@ -7820,6 +8108,66 @@ async function runGroupMemberTurn(
   // fresh bot rather than mixing a stale adapter with fresh permissions.
   setupRetry = 0,
 ): Promise<boolean> {
+  const initial = store.bot(botId);
+  if (!initial) return false;
+  const retry: GroupModelRetry = {
+    attempts: 1, visited: new Set([selectionKey(initial.modelSelection)]),
+  };
+  for (;;) {
+    retry.next = undefined;
+    const ran = await runGroupMemberAttempt(
+      groupId, threadId, botId, hop, spoken, cardContinuation, onDispatchError,
+      isCancelled, onProviderHandshakeStarted, onProviderHandshakeSettled,
+      skillAuthoringClaim, orchestration, operation, setupRetry, retry,
+    );
+    const next = retry.next as BotRecord["modelSelection"] | undefined;
+    if (!next || isCancelled?.()) return ran;
+    retry.selection = next;
+    retry.attempts += 1;
+    retry.visited.add(selectionKey(next));
+    orchestration?.onModelRetry?.();
+    if (orchestration) {
+      orchestration.result.replyText = "";
+      orchestration.result.outcome = undefined;
+      orchestration.result.stopReason = null;
+    }
+    store.appendMessage(threadId, {
+      role: "bot", kind: "activity",
+      from: { botId: initial.id, name: initial.name, color: initial.color },
+      tool: { name: `Model unavailable — switched to ${next.instanceId} / ${next.model} (attempt ${retry.attempts}/${cfg.modelFailover?.maxAttempts ?? 2})`, ok: true },
+    });
+  }
+}
+
+type GroupModelRetry = ModelFailoverChain & {
+  selection?: BotRecord["modelSelection"];
+  next?: BotRecord["modelSelection"];
+};
+
+async function runGroupMemberAttempt(
+  groupId: string,
+  threadId: string,
+  botId: string,
+  hop: number,
+  // bots that already spoke for this user message — "@Scout ask @Pixel"
+  // must not run Pixel twice (once chained, once as a direct responder)
+  spoken: Set<string> = new Set(),
+  cardContinuation?: string,
+  onDispatchError?: (message: string) => void,
+  isCancelled?: () => boolean,
+  onProviderHandshakeStarted?: () => void,
+  onProviderHandshakeSettled?: () => void,
+  skillAuthoringClaim: { claimed: boolean } = { claimed: false },
+  orchestration?: GroupTurnOrchestration,
+  // chat rounds only: lets a chained @mention wait for a busy teammate the
+  // way the responder loop does (goal runs never follow mentions)
+  operation?: GroupTurnOperation,
+  // Connected-app discovery yields before the bot is claimed. If an
+  // execution setting changes in that gap, rebuild the turn once from the
+  // fresh bot rather than mixing a stale adapter with fresh permissions.
+  setupRetry = 0,
+  retry?: GroupModelRetry,
+): Promise<boolean> {
   if (workspaceMaintenance.active) {
     onDispatchError?.("A workspace backup or restore is in progress.");
     return false;
@@ -7830,7 +8178,11 @@ async function runGroupMemberTurn(
     return false;
   }
   const group = store.group(groupId);
-  const bot = store.bot(botId);
+  const savedBot = store.bot(botId);
+  const bot = savedBot && retry?.selection
+    ? { ...savedBot, modelSelection: retry.selection, approvalMode: "ask" as const, autoApprove: false, alwaysAllow: [] }
+    : savedBot;
+  const savedSelection = savedBot ? { ...savedBot.modelSelection } : undefined;
   const ownsThread = group?.dm
     ? group.threadId === threadId
     : Boolean(group && store.groupTaskByThread(group.id, threadId));
@@ -7845,7 +8197,7 @@ async function runGroupMemberTurn(
   // delegated Full elevation makes the two disagree by construction: every
   // such room turn then reads as "settings changed", retries once, and
   // settles as busy without ever dispatching.
-  const preparedApprovalMode = roomTurnApprovalMode(bot, orchestration);
+  const preparedApprovalMode = retry?.selection ? "ask" : roomTurnApprovalMode(bot, orchestration);
   const preparedSelection = { ...bot.modelSelection };
   const preparedComposio = bot.composio;
   const instance = turnInstance(bot);
@@ -7855,6 +8207,23 @@ async function runGroupMemberTurn(
     return true;
   }
   if (!instance) {
+    const policy = cfg.modelFailover;
+    const active = () => !isCancelled?.() && !providerFleetReloading && cfg.modelFailover?.enabled === true &&
+      store.bot(bot.id)?.busy === false && store.group(group.id)?.memberIds.includes(bot.id) === true &&
+      store.bot(bot.id)?.modelSelection.instanceId === savedSelection?.instanceId &&
+      store.bot(bot.id)?.modelSelection.model === savedSelection?.model;
+    if (retry && policy?.enabled && policy.candidates.length && turnProvider(bot) !== "box") {
+      if (orchestration) orchestration.result.failoverHandled = true;
+      const candidate = retry.attempts < (policy.maxAttempts ?? 2) && (orchestration?.canRetryModel?.() ?? true)
+        ? await availableFailoverCandidate({
+            candidates: policy.candidates, visited: retry.visited,
+            get: id => registry.get(id),
+            excluded: id => providerInstancesChanging.has(id) || managedDesktop.owns(id),
+            failedUntil: failedModelSelections, active,
+            needsImages: store.activePath(threadId).some(message => message.role === "user" && Boolean(message.text && extractTurnImages(message.text).images.length)),
+          }) : null;
+      if (candidate && active()) { retry.next = candidate; return false; }
+    }
     const message = `${bot.name}'s model is unavailable`;
     store.appendMessage(threadId, {
       role: "bot",
@@ -7900,6 +8269,8 @@ async function runGroupMemberTurn(
     releaseTurnResources(resourceOwner);
   };
   let roomHandoffSourceSucceeded = false;
+  let projection: { botId: string; selection: BotRecord["modelSelection"] } | undefined;
+  let failover: GroupModelFailoverState | undefined;
   try {
   // A workspace at its monthly spend limit rechecks the cap at execution time
   // for every room, goal, queued, calendar, and chained-mention turn.
@@ -7976,7 +8347,10 @@ async function runGroupMemberTurn(
   // A 1:1 or another room turn may have claimed this bot while connected-app
   // setup was in flight. Re-check immediately before the synchronous claim so
   // one bot can never own two provider processes.
-  const readyBot = store.bot(bot.id);
+  const freshBot = store.bot(bot.id);
+  const readyBot = freshBot && retry?.selection
+    ? { ...freshBot, modelSelection: retry.selection, approvalMode: "ask" as const, autoApprove: false, alwaysAllow: [] }
+    : freshBot;
   if (!readyBot) return false;
   const readyGroup = store.group(group.id);
   const stillOwnsThread = readyGroup?.dm
@@ -7985,7 +8359,9 @@ async function runGroupMemberTurn(
   if (!readyGroup || !stillOwnsThread || !readyGroup.memberIds.includes(readyBot.id)) return false;
   const setupChanged =
     turnInstance(readyBot) !== instance ||
-    roomTurnApprovalMode(readyBot, orchestration) !== preparedApprovalMode ||
+    (retry?.selection ? "ask" : roomTurnApprovalMode(readyBot, orchestration)) !== preparedApprovalMode ||
+    freshBot?.modelSelection.instanceId !== savedSelection?.instanceId ||
+    freshBot?.modelSelection.model !== savedSelection?.model ||
     readyBot.modelSelection.instanceId !== preparedSelection.instanceId ||
     readyBot.modelSelection.model !== preparedSelection.model ||
     readyBot.modelSelection.effort !== preparedSelection.effort ||
@@ -7993,7 +8369,7 @@ async function runGroupMemberTurn(
     readyBot.composio !== preparedComposio;
   if (setupChanged) {
     if (setupRetry === 0) {
-      return runGroupMemberTurn(
+      return runGroupMemberAttempt(
         groupId,
         threadId,
         botId,
@@ -8008,6 +8384,7 @@ async function runGroupMemberTurn(
         orchestration,
         operation,
         1,
+        retry,
       );
     }
     if (orchestration) {
@@ -8073,6 +8450,8 @@ async function runGroupMemberTurn(
     onDispatchError?.(message);
     return true;
   }
+  projection = retry?.selection ? { botId: bot.id, selection: retry.selection } : undefined;
+  if (projection) groupTurnModelOverrides.set(threadId, projection);
   store.setActivity(bot.id, "working");
   // Claim cleanup ownership before browser preparation can yield or reject.
   // The finally block must release exactly this setup, never a newer turn.
@@ -8315,6 +8694,8 @@ async function runGroupMemberTurn(
     else markCancelledProviderHandshake(threadId, retirementOwner);
   };
   const timeoutMinutes = roomTurnTimeoutMinutes(cfg);
+  let dispatchReady!: () => void;
+  const dispatchSettled = new Promise<void>(resolve => { dispatchReady = resolve; });
   const outcome = await new Promise<GroupMemberTurnOutcome>((resolve) => {
     let done = false;
     let unsub = () => {};
@@ -8357,6 +8738,55 @@ async function runGroupMemberTurn(
       else if (e.type === "request.opened") deadline.setWaitingOnHuman(true);
       else if (e.type === "request.resolved") deadline.setWaitingOnHuman(false);
     });
+    const policy = cfg.modelFailover;
+    if (retry && policy?.enabled && policy.candidates.length && instance.driverKind !== "boxAgent" && !managedDesktop.owns(instance.instanceId)) {
+      const state: GroupModelFailoverState = {
+        instanceId: instance.instanceId, generation: internalGeneration, attempt: new ModelFailoverAttempt(),
+        retry: async () => {
+          await dispatchSettled;
+          if (orchestration) orchestration.result.failoverHandled = true;
+          const active = () => !done && !abandoned && !state.cancelled && !isCancelled?.() &&
+            groupModelFailovers.get(threadId) === state &&
+            groupSpeakers.get(threadId) === roomSpeaker &&
+            activeInternalGenerationByThread.get(threadId) === internalGeneration &&
+            !providerFleetReloading && cfg.modelFailover?.enabled === true &&
+            Boolean(store.group(group.id)?.memberIds.includes(bot.id)) &&
+            store.bot(bot.id)?.modelSelection.instanceId === savedSelection?.instanceId &&
+            store.bot(bot.id)?.modelSelection.model === savedSelection?.model;
+          failedModelSelections.set(selectionKey(preparedSelection), Date.now() + 60_000);
+          const reason = modelFailoverReason([...state.attempt.errors, state.terminal?.stopReason ?? ""].join("\n"));
+          if (reason === "auth" || reason === "quota") {
+            retry.visited.add(`${instance.instanceId}\0*`);
+            failedModelSelections.set(`${instance.instanceId}\0*`, Date.now() + 60_000);
+          }
+          const candidate = retry.attempts < (cfg.modelFailover?.maxAttempts ?? 2) &&
+            (orchestration?.canRetryModel?.() ?? true) && active()
+            ? await availableFailoverCandidate({
+                candidates: cfg.modelFailover!.candidates,
+                visited: retry.visited, get: id => registry.get(id),
+                excluded: id => providerInstancesChanging.has(id) || managedDesktop.owns(id),
+                failedUntil: failedModelSelections, active,
+                needsImages: resolvedLatestImages.images.length > 0,
+              }) : null;
+          if (!candidate || !active()) {
+            releaseGroupFailoverFailure(threadId, state, Boolean(isCancelled?.() || state.cancelled));
+            return;
+          }
+          if (state.terminal) recordFailedModelAttemptUsage(bot, threadId, preparedSelection, state.terminal);
+          retry.next = candidate;
+          groupModelFailovers.delete(threadId);
+          state.attempt.takeBuffered();
+          if (state.turnId) retireProviderTurn(state.turnId);
+          watchdog.settle(threadId);
+          turnUsage.delete(threadId);
+          turnContext.delete(threadId);
+          runningTurnEngines.delete(threadId);
+          finish("retry_model");
+        },
+      };
+      failover = state;
+      groupModelFailovers.set(threadId, state);
+    }
     deadline.start();
     unregisterStall = roomStallCompletions.register(threadId, () => {
       abandonProviderTurn();
@@ -8372,7 +8802,7 @@ async function runGroupMemberTurn(
         text,
         refreshSystemPrompt: true,
         images: turnImages,
-        approvalMode: roomTurnApprovalMode(readyBot, orchestration),
+        approvalMode: preparedApprovalMode,
         system: roomSystem.text,
         systemStable: roomSystem.stable,
         systemVolatile: roomSystem.volatile,
@@ -8399,16 +8829,32 @@ async function runGroupMemberTurn(
         if (dispatch.cancelled) {
           retireProviderTurn(dispatch.value.turnId);
           onProviderHandshakeSettled?.();
+          dispatchReady();
           finish("cancelled");
           return;
         }
         onProviderHandshakeSettled?.();
+        dispatchReady();
       })
       .catch((err) => {
+        dispatchReady();
         onProviderHandshakeSettled?.();
         clearCancelledProviderHandshake(threadId, retirementOwner);
         if (abandoned) return;
         const message = err instanceof Error ? err.message : "turn failed";
+        if (failover && !failover.pending && !failover.cancelled && !failover.attempt.unsafe &&
+            groupModelFailovers.get(threadId) === failover && modelFailoverReason(message)) {
+          // Some adapters reject admission without terminal events. Route that
+          // known availability failure through the same single terminal gate.
+          const base = {
+            eventId: randomUUID(), provider: instance.driverKind,
+            providerInstanceId: instance.instanceId, threadId, turnId: providerTurnId,
+            createdAt: new Date().toISOString(),
+          };
+          bus.publish({ ...base, type: "runtime.error", message });
+          bus.publish({ ...base, eventId: randomUUID(), type: "turn.completed", ok: false, stopReason: message });
+          return;
+        }
         store.appendMessage(threadId, {
           role: "bot",
           kind: "activity",
@@ -8510,7 +8956,7 @@ async function runGroupMemberTurn(
     drainSecretResumes();
     drainTeamSetupResumes();
   }
-  if (outcome === "provider_failed") {
+  if (outcome === "provider_failed" || outcome === "retry_model") {
     if (skillAuthoring) skillAuthoringClaim.claimed = false;
     return false;
   }
@@ -8602,6 +9048,8 @@ async function runGroupMemberTurn(
     }
     return false;
   } finally {
+    if (projection && groupTurnModelOverrides.get(threadId) === projection) groupTurnModelOverrides.delete(threadId);
+    if (failover && groupModelFailovers.get(threadId) === failover) groupModelFailovers.delete(threadId);
     // Covers connector/setup failures, cancellation before dispatch, and all
     // other early returns that never produce a provider terminal event.
     revokeInternalCapabilityGeneration(threadId, internalGeneration);
@@ -8680,6 +9128,16 @@ async function runGroupGoalStep(args: {
           systemInstructions: args.instructions,
           followMentions: false,
           result,
+          canRetryModel: () => run.turnCount < run.maxTurns,
+          onModelRetry: () => {
+            claimed = false;
+            if (coordinatorTurn) {
+              removeGroupGoalCoordinatorTurn(args.threadId, coordinatorTurn);
+              coordinatorTurn.turnId = undefined;
+              coordinatorTurn.assistantItems = [];
+              addGroupGoalCoordinatorTurn(args.threadId, coordinatorTurn);
+            }
+          },
           onClaimed: () => {
             if (claimed) return;
             claimed = true;
@@ -8708,7 +9166,7 @@ async function runGroupGoalStep(args: {
         outcome === "dispatch_failed" ||
         outcome === "stalled" ||
         outcome === "timed_out";
-      if (transient && !retriedTransient) {
+      if (transient && !retriedTransient && !result.failoverHandled) {
         retriedTransient = true;
         updateGroupGoalRunProgress(
           args.operation,
@@ -10183,6 +10641,7 @@ async function perBotLocalVmCountForModeChange(): Promise<number | null> {
 
 function configStatus() {
   return {
+    modelFailover: cfg.modelFailover ?? { enabled: false, maxAttempts: 2, candidates: [] },
     xai: { configured: Boolean(cfg.xai?.key) },
     anthropic: { configured: Boolean(cfg.anthropic?.key) },
     // a fleet agent on this server means Settings → Workspaces has something to drive

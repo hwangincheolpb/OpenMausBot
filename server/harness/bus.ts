@@ -20,6 +20,7 @@ export class EventBus {
   private unsubscribes = new Map<string, () => void>();
   private pendingLogWarnings = new Map<string, RuntimeEvent>();
   private readonly appendLog: typeof appendFileSync;
+  private deliveryGate?: (event: RuntimeEvent) => boolean;
 
   constructor(appendLog: typeof appendFileSync = appendFileSync) {
     this.appendLog = appendLog;
@@ -77,6 +78,17 @@ export class EventBus {
         this.deliver(warning);
       }
     }
+    if (!this.deliveryGate || this.deliveryGate(event)) this.deliver(event);
+  }
+
+  /** A logical-turn owner can hold an intermediate failure before any
+   * subscriber settles it. The canonical log still records the raw event. */
+  setDeliveryGate(gate: (event: RuntimeEvent) => boolean) {
+    this.deliveryGate = gate;
+  }
+
+  /** Release an already logged event exactly once, without re-entering its gate. */
+  release(event: RuntimeEvent) {
     this.deliver(event);
   }
 
