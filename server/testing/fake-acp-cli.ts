@@ -50,6 +50,17 @@ import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const mode = process.env.FAKE_ACP_MODE ?? "happy";
+
+// Follow the spawning server down. A suite that SIGTERMs its server can
+// exit before every adapter has disposed its child; a fake parked in a
+// keep-alive mode would then outlive the run (19 did after one failover
+// pass). Reparenting to launchd/init is the signal. Inline on purpose: fakes
+// stay dependency-free and one is copied out of the repo.
+{
+  const spawner = process.ppid;
+  const orphanWatch = setInterval(() => { if (process.ppid !== spawner) process.exit(0); }, 500);
+  orphanWatch.unref();
+}
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 // opencode-shaped surface: the session carries its own model catalog and the
 // model is chosen with session/set_config_option, because `opencode acp` takes
