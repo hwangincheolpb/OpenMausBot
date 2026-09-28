@@ -2,18 +2,18 @@ import { createServer } from "node:http";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
 
-it("keeps the selected API model for direct, group and scheduled Box turns and preserves human control", async () => {
+it("keeps the selected API model for direct, group and scheduled Boat turns and preserves human control", async () => {
   const rows: Array<{ id: string; name: string; state: string }> = [];
   const requests: any[] = [];
   const commands: string[] = [];
   let nativePrompts = 0;
-  let boxOffline = false;
-  let boxReadsGate: { entered: boolean; resumed: Promise<void>; release: () => void } | undefined;
-  const pauseBoxReads = () => {
+  let boatOffline = false;
+  let boatReadsGate: { entered: boolean; resumed: Promise<void>; release: () => void } | undefined;
+  const pauseBoatReads = () => {
     let release!: () => void;
     const resumed = new Promise<void>(resolve => { release = resolve; });
     const gate = { entered: false, resumed, release };
-    boxReadsGate = gate;
+    boatReadsGate = gate;
     return gate;
   };
   const upstream = createServer(async (req, res) => {
@@ -21,7 +21,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
     let raw = ""; for await (const part of req) raw += part;
     const body = raw ? JSON.parse(raw) : {};
     res.setHeader("content-type", "application/json");
-    const gate = boxReadsGate;
+    const gate = boatReadsGate;
     if (gate && req.method === "GET" && path.startsWith("/boxes")) {
       gate.entered = true;
       await gate.resumed;
@@ -36,7 +36,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
         : { role: "assistant", content: null, tool_calls: [{ id: "capture", type: "function", function: { name: tool?.function.name ?? "missing_computer", arguments: "{}" } }] },
       finish_reason: completed ? "stop" : "tool_calls" }] }));
     }
-    if (boxOffline && path.startsWith("/boxes")) { res.statusCode = 503; return res.end(JSON.stringify({ error: "Fixture Box unavailable" })); }
+    if (boatOffline && path.startsWith("/boxes")) { res.statusCode = 503; return res.end(JSON.stringify({ error: "Fixture Boat unavailable" })); }
     if (path === "/boxes" && req.method === "POST") {
       const row = { id: rows.length ? "bx_3456789a" : "bx_23456789", name: body.name, state: "idle" }; rows.push(row);
       return res.end(JSON.stringify({ box: row }));
@@ -69,12 +69,12 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
   const control = (args: string[]) => runControlOmb([...args, "--url", fixture.info.url]) as Promise<any>;
   try {
     await api("PATCH", "/api/config", { openaiCompat: { key: "synthetic-model-key", url: origin + "/v1", model: "other-default" } });
-    const { bot } = await control(["new-bot", "--name", "Box API fixture"]);
+    const { bot } = await control(["new-bot", "--name", "Boat API fixture"]);
     await control(["set-model", "--bot", bot.id, "--instance", "openaiCompat", "--model", "chosen-vision-model"]);
     await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud", browser: false });
     let group: any;
     for (const scenario of ["direct", "held", "group"]) {
-      if (scenario === "group") ({ group } = await api("POST", "/api/groups", { name: "Box fixture room", memberIds: [bot.id], setup: { bulletin: "", defaultResponder: { kind: "member", botId: bot.id } } }));
+      if (scenario === "group") ({ group } = await api("POST", "/api/groups", { name: "Boat fixture room", memberIds: [bot.id], setup: { bulletin: "", defaultResponder: { kind: "member", botId: bot.id } } }));
       const before = requests.length;
       const destination = scenario === "group" ? ["--channel", group.id, "--task", group.threadId] : ["--bot", bot.id, "--task", bot.activeTaskId];
       await control([scenario === "group" ? "send-channel" : "send", ...destination, "--text", "Inspect the assigned cloud desktop."]);
@@ -103,7 +103,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
     const { routine } = await api("POST", "/api/routines", { name: "Cloud fixture", botId: bot.id,
       prompt: "Inspect the assigned cloud desktop.", runOn: "cloud", enabled: false,
       schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 } });
-    const readiness = pauseBoxReads();
+    const readiness = pauseBoatReads();
     const { run } = await api("POST", `/api/routines/${routine.id}/run`, {});
     let routineThread = "";
     await expect.poll(async () => {
@@ -118,7 +118,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
       .tasks.find((task: any) => task.threadId === routineThread);
     expect(preparing).toMatchObject({ busy: true, activity: "working" });
     expect((await control(["wait", ...destination, "--timeout", "1"])).status).toBe("timed-out");
-    boxReadsGate = undefined;
+    boatReadsGate = undefined;
     readiness.release();
     const waiting = await control(["wait", ...destination, "--timeout", "20"]);
     expect(waiting.status, JSON.stringify(waiting)).toBe("needs-user");
@@ -133,7 +133,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
     expect(commands.some(command => command.includes(".model.jpg"))).toBe(true);
     // Stop during readiness must revoke this generation before any late
     // network response can provision a computer or dispatch the model.
-    const cancelledReadiness = pauseBoxReads();
+    const cancelledReadiness = pauseBoatReads();
     const beforeCancel = requests.length;
     const { run: cancelled } = await api("POST", `/api/routines/${routine.id}/run`, {});
     let cancelledThread = "";
@@ -143,7 +143,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
     }, { timeout: 15_000 }).not.toBe("");
     await expect.poll(() => cancelledReadiness.entered).toBe(true);
     expect((await api("POST", `/api/routine-runs/${cancelled.id}/cancel`, {})).run.status).toBe("cancelled");
-    boxReadsGate = undefined;
+    boatReadsGate = undefined;
     cancelledReadiness.release();
     const stopped = await control(["wait", "--bot", bot.id, "--task", cancelledThread, "--timeout", "20"]);
     expect(stopped.status).toBe("settled");
@@ -151,7 +151,7 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
     const cancelledMessages = await api("GET", `/api/threads/${cancelledThread}/messages?limit=30`);
     expect(cancelledMessages.messages.some((message: any) => message.card?.requestId)).toBe(false);
     // Readiness is checked again at dispatch, after the routine was created.
-    // An available native Box runner must not mask the selected engine's missing key.
+    // An available native Boat runner must not mask the selected engine's missing key.
     const expectBlockedRun = async (reason: RegExp) => {
       const before = requests.length;
       const { run: blocked } = await api("POST", `/api/routines/${routine.id}/run`, {});
@@ -165,10 +165,10 @@ it("keeps the selected API model for direct, group and scheduled Box turns and p
     await api("PATCH", "/api/config", { openaiCompat: { key: "", url: origin + "/v1", model: "other-default" } });
     await expectBlockedRun(/target bot's model engine is not ready/i);
     await api("PATCH", "/api/config", { openaiCompat: { key: "synthetic-model-key", url: origin + "/v1", model: "other-default" } });
-    boxOffline = true;
+    boatOffline = true;
     await expectBlockedRun(/cloud computer could not be checked/i);
   } finally {
-    boxReadsGate?.release();
+    boatReadsGate?.release();
     await fixture.close(); upstream.closeAllConnections();
     await new Promise<void>(resolve => upstream.close(() => resolve()));
   }

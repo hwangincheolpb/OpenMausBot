@@ -39,7 +39,7 @@ beforeAll(async () => {
 beforeEach(() => { calls.length = 0; state = { held: false, helpOpen: false }; controlStatus = 200; holdCommand = false; commandStarted = undefined; });
 afterAll(async () => { vi.unstubAllEnvs(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
 
-describe("chat Box bridge", () => {
+describe("chat Boat bridge", () => {
   it("mounts only with computer support and a leased control gate", async () => {
     const signal = new AbortController().signal;
     const disabled = await mount(integrations, signal);
@@ -59,7 +59,7 @@ describe("chat Box bridge", () => {
     ["open_url", { url: "https://example.com/?a='&b=2" }, "xdg-open"],
     ["exec", { command: "printf hello" }, "printf hello"],
     ["get_screen_size", {}, "getdisplaygeometry"],
-  ] as const)("executes validated %s on the assigned Box only", async (name, args, expected) => {
+  ] as const)("executes validated %s on the assigned Boat only", async (name, args, expected) => {
     const signal = new AbortController().signal;
     const session = await mount(integrations, signal, true);
     try {
@@ -99,7 +99,7 @@ describe("chat Box bridge", () => {
     } finally { await session.close(); }
   });
 
-  it("rejects invalid arguments before any control or Box request", async () => {
+  it("rejects invalid arguments before any control or Boat request", async () => {
     const signal = new AbortController().signal;
     const session = await mount(integrations, signal, true);
     try {
@@ -109,7 +109,7 @@ describe("chat Box bridge", () => {
     } finally { await session.close(); }
   });
 
-  it("aborts an in-flight Box operation and closes the session without retrying", async () => {
+  it("aborts an in-flight Boat operation and closes the session without retrying", async () => {
     holdCommand = true;
     const started = new Promise<void>(resolve => { commandStarted = resolve; });
     const abort = new AbortController();

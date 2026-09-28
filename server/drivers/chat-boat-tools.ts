@@ -1,4 +1,4 @@
-import { isolatedRemoteCommand, runCommand, screenshotBox } from "../box.ts";
+import { isolatedRemoteCommand, runCommand, screenshotBoat } from "../boat.ts";
 import type { SendTurnInput } from "../contracts.ts";
 import { createControlClient, CONTROL_REFUSAL_PLAIN } from "../control-client.ts";
 
@@ -24,7 +24,7 @@ const scrollButtons: Record<string, number> = { up: 4, down: 5, left: 6, right: 
 
 /** Uses only the leased descriptor supplied by the harness. Schema validation
  * and user approval happen in the shared chat tool executor before this call. */
-export class ChatBoxClient {
+export class ChatBoatClient {
   private closed = false;
   private readonly control: ReturnType<typeof createControlClient>;
   private readonly descriptor: Descriptor;
@@ -46,7 +46,7 @@ export class ChatBoxClient {
     const config = { box: { token: this.descriptor.token } };
     const id = this.descriptor.boxId;
     if (name === "screenshot") {
-      const shot = await screenshotBox(config, "", id, { signal, nativeSize: true });
+      const shot = await screenshotBoat(config, "", id, { signal, nativeSize: true });
       signal.throwIfAborted();
       return { content: [{ type: "image", mimeType: "image/jpeg", data: shot.png }] };
     }

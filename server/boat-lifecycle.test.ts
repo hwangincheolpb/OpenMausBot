@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 describe("cloud computer lifecycle", () => {
   let api: Server;
-  let sleepBox: typeof import("./box.ts").sleepBox;
-  let execOnBox: typeof import("./box.ts").execOnBox;
+  let sleepBoat: typeof import("./boat.ts").sleepBoat;
+  let execOnBoat: typeof import("./boat.ts").execOnBoat;
   const requests: Array<{ method: string; path: string; command?: string }> = [];
   const botId = "browser-session-test";
 
@@ -14,7 +14,7 @@ describe("cloud computer lifecycle", () => {
     const prefix = botId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "");
     const machineName = `ogb-${prefix}-${hash}`;
     api = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://box.test");
+      const url = new URL(req.url ?? "/", "http://boat.test");
       let body = "";
       req.on("data", (chunk) => (body += chunk));
       req.on("end", () => {
@@ -36,7 +36,7 @@ describe("cloud computer lifecycle", () => {
     const port = (api.address() as any).port;
     vi.stubEnv("OMB_BOX_API", `http://127.0.0.1:${port}/api/box/v1`);
     vi.resetModules();
-    ({ execOnBox, sleepBox } = await import("./box.ts"));
+    ({ execOnBoat, sleepBoat } = await import("./boat.ts"));
   });
 
   afterAll(async () => {
@@ -45,7 +45,7 @@ describe("cloud computer lifecycle", () => {
   });
 
   it("asks Chrome to exit before archiving the computer", async () => {
-    await sleepBox({ box: { token: "box_test" } } as any, botId);
+    await sleepBoat({ box: { token: "box_test" } } as any, botId);
 
     const commandIndex = requests.findIndex((request) => request.path.endsWith("/commands"));
     const stopIndex = requests.findIndex((request) => request.path.endsWith("/stop"));
@@ -57,7 +57,7 @@ describe("cloud computer lifecycle", () => {
 
   it("runs the owner console in the same clean environment as the bot tool", async () => {
     requests.length = 0;
-    await execOnBox({ box: { token: "box_test" } } as any, botId, `printf '%s' "$BOX_TOKEN"`);
+    await execOnBoat({ box: { token: "box_test" } } as any, botId, `printf '%s' "$BOX_TOKEN"`);
 
     const command = requests.find((request) => request.path.endsWith("/commands"))?.command ?? "";
     expect(command).toContain('exec env -i HOME="$HOME"');
@@ -67,7 +67,7 @@ describe("cloud computer lifecycle", () => {
   it("rejects an oversized owner-console command before contacting the provider", async () => {
     requests.length = 0;
     await expect(
-      execOnBox({ box: { token: "box_test" } } as any, botId, "x".repeat(4001)),
+      execOnBoat({ box: { token: "box_test" } } as any, botId, "x".repeat(4001)),
     ).rejects.toThrow("maximum 4000 characters");
     expect(requests).toHaveLength(0);
   });

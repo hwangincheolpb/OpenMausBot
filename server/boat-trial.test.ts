@@ -2,15 +2,15 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-describe("Box trial provisioning", () => {
+describe("Boat trial provisioning", () => {
   let api: Server;
-  let provisionBox: typeof import("./box.ts").provisionBox;
+  let provisionBoat: typeof import("./boat.ts").provisionBoat;
   const createBodies: Array<{ ttlSeconds: number; noEnv: boolean }> = [];
   const createKeys: string[] = [];
 
   beforeAll(async () => {
     api = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://box.test");
+      const url = new URL(req.url ?? "/", "http://boat.test");
       let raw = "";
       req.on("data", (chunk) => (raw += chunk));
       req.on("end", () => {
@@ -52,7 +52,7 @@ describe("Box trial provisioning", () => {
     const port = (api.address() as AddressInfo).port;
     vi.stubEnv("OMB_BOX_API", `http://127.0.0.1:${port}/api/box/v1`);
     vi.resetModules();
-    ({ provisionBox } = await import("./box.ts"));
+    ({ provisionBoat } = await import("./boat.ts"));
   });
 
   afterAll(async () => {
@@ -62,8 +62,8 @@ describe("Box trial provisioning", () => {
 
   it("retries the structured trial TTL refusal exactly once at the allowed ceiling", async () => {
     // SAFETY: AppConfig's remaining sections are optional; this test supplies
-    // the only credential the Box path reads.
-    const result = await provisionBox({ box: { token: "box_trial" } } as any, "trial-bot", "Trial Bot");
+    // the only credential the Boat path reads.
+    const result = await provisionBoat({ box: { token: "box_trial" } } as any, "trial-bot", "Trial Bot");
     expect(result.boxId).toBe("bx_23456789");
     expect(createBodies).toEqual([
       { ttlSeconds: 8 * 60 * 60, noEnv: true },

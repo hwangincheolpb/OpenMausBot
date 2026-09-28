@@ -520,7 +520,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         };
         const allowedCredentials = new Set(support.credentialEnv ?? []);
         // two lists, one rule: foreign PROVIDER keys must not flip a CLI's
-        // billing off its own login, and WORKSPACE credentials (box token,
+        // billing off its own login, and WORKSPACE credentials (boat token,
         // voice key, …) are the harness's secrets — riding along in
         // `...process.env` is not a grant. A driver keeps only what its
         // credentialEnv allowlist names.
@@ -693,7 +693,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         }
         // The bot's computer, mounted exactly like the Claude driver does:
         // host and sandbox Cua connections expose Cua Driver's own MCP server.
-        // (A cloud box is not mounted here at all: a cloud turn runs ON the box.)
+        // (A cloud boat is not mounted here at all: a cloud turn runs ON the boat.)
         if (turn.integrations?.localComputer) {
           const local = turn.integrations.localComputer;
           servers.push({

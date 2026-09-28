@@ -7,7 +7,7 @@ type RequestRecord = { method: string; path: string; headers: IncomingMessage["h
 describe("cloud computer provisioning cleanup", () => {
   const deletionOperationId = "bdop_0123456789abcdef0123456789abcdef";
   let api: Server;
-  let provisionBox: typeof import("./box.ts").provisionBox;
+  let provisionBoat: typeof import("./boat.ts").provisionBoat;
   let scenario:
     | "rename-failure"
     | "rename-failure-delete-gone"
@@ -25,7 +25,7 @@ describe("cloud computer provisioning cleanup", () => {
 
   beforeAll(async () => {
     api = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://box.test");
+      const url = new URL(req.url ?? "/", "http://boat.test");
       let body = "";
       req.on("data", (chunk) => (body += chunk));
       req.on("end", () => {
@@ -33,11 +33,12 @@ describe("cloud computer provisioning cleanup", () => {
         res.setHeader("content-type", "application/json");
 
         if (url.pathname === "/api/box/v1/boxes" && req.method === "GET") {
-          const boxes =
+          const boats =
             scenario === "existing-desktop-failure"
               ? [{ id: "bx_456789ab", name: nameFor("existing-bot"), state: "ready" }]
               : [];
-          res.writeHead(200).end(JSON.stringify({ ok: true, boxes }));
+          // The provider list endpoint still answers with its historical "boxes" key.
+          res.writeHead(200).end(JSON.stringify({ ok: true, boxes: boats }));
         } else if (url.pathname === "/api/box/v1/boxes" && req.method === "POST") {
           mutateConfigAfterCreate?.();
           createdName = "provider-created";
@@ -101,7 +102,7 @@ describe("cloud computer provisioning cleanup", () => {
     const port = (api.address() as any).port;
     vi.stubEnv("OMB_BOX_API", `http://127.0.0.1:${port}/api/box/v1`);
     vi.resetModules();
-    ({ provisionBox } = await import("./box.ts"));
+    ({ provisionBoat } = await import("./boat.ts"));
   });
 
   afterAll(async () => {
@@ -110,9 +111,9 @@ describe("cloud computer provisioning cleanup", () => {
   });
 
   beforeEach(async () => {
-    const deletionJournal = await import("./box-delete-journal.ts");
-    for (const record of deletionJournal.boxDeletionSnapshot()) {
-      deletionJournal.retireBoxDeletion(record.boxId);
+    const deletionJournal = await import("./boat-delete-journal.ts");
+    for (const record of deletionJournal.boatDeletionSnapshot()) {
+      deletionJournal.retireBoatDeletion(record.boxId);
     }
   });
 
@@ -120,7 +121,7 @@ describe("cloud computer provisioning cleanup", () => {
     scenario = "rename-failure";
     requests.length = 0;
 
-    await expect(provisionBox({ box: { token: "box_test" } } as any, "new-bot", "New Bot")).rejects.toThrow(
+    await expect(provisionBoat({ box: { token: "box_test" } } as any, "new-bot", "New Bot")).rejects.toThrow(
       /box naming failed: rename rejected/,
     );
 
@@ -140,24 +141,24 @@ describe("cloud computer provisioning cleanup", () => {
     requests.length = 0;
 
     await expect(
-      provisionBox({ box: { token: "box_test" } } as any, "existing-bot", "Existing Bot"),
+      provisionBoat({ box: { token: "box_test" } } as any, "existing-bot", "Existing Bot"),
     ).rejects.toThrow(/desktop link could not be created/);
 
     expect(requests.some((request) => request.method === "DELETE")).toBe(false);
   });
 
-  it("keeps a newly named Box recoverable while failed-provisioning cleanup is pending", async () => {
+  it("keeps a newly named Boat recoverable while failed-provisioning cleanup is pending", async () => {
     scenario = "desktop-failure-delete-pending";
     requests.length = 0;
     createdName = "";
     const botId = "pending-cleanup-bot";
 
-    await expect(provisionBox({ box: { token: "box_test" } } as any, botId, "Pending Cleanup")).rejects.toThrow(
+    await expect(provisionBoat({ box: { token: "box_test" } } as any, botId, "Pending Cleanup")).rejects.toThrow(
       /box desktop link could not be created.*accepted deletion.*still pending.*recovery record was kept/i,
     );
 
-    const journal = await import("./box-create-idempotency.ts");
-    expect(journal.boxCreateRecoverySnapshot()).toContainEqual({
+    const journal = await import("./boat-create-idempotency.ts");
+    expect(journal.boatCreateRecoverySnapshot()).toContainEqual({
       botId,
       boxId: "bx_3456789a",
       resolved: true,
@@ -169,20 +170,20 @@ describe("cloud computer provisioning cleanup", () => {
       expect.objectContaining({ method: "GET", path: "/api/box/v1/boxes/bx_3456789a" }),
     ]));
 
-    journal.retireDeletedBoxCreate("bx_3456789a");
+    journal.retireDeletedBoatCreate("bx_3456789a");
   });
 
-  it("retires a new-Box create receipt when cleanup DELETE proves it already gone", async () => {
+  it("retires a new-Boat create receipt when cleanup DELETE proves it already gone", async () => {
     scenario = "rename-failure-delete-gone";
     requests.length = 0;
     const botId = "gone-during-cleanup";
 
-    await expect(provisionBox({ box: { token: "box_test" } } as any, botId, "Gone Cleanup")).rejects.toThrow(
+    await expect(provisionBoat({ box: { token: "box_test" } } as any, botId, "Gone Cleanup")).rejects.toThrow(
       /box naming failed: rename rejected/,
     );
 
-    const journal = await import("./box-create-idempotency.ts");
-    expect(journal.boxCreateRecoverySnapshot().some((entry) => entry.botId === botId)).toBe(false);
+    const journal = await import("./boat-create-idempotency.ts");
+    expect(journal.boatCreateRecoverySnapshot().some((entry) => entry.botId === botId)).toBe(false);
   });
 
   it("keeps create, rename, and cleanup on the token captured at operation start", async () => {
@@ -193,7 +194,7 @@ describe("cloud computer provisioning cleanup", () => {
       config.box.token = "box_replacement";
     };
     try {
-      await expect(provisionBox(config, "token-race-bot", "Token Race Bot")).rejects.toThrow(/box naming failed/);
+      await expect(provisionBoat(config, "token-race-bot", "Token Race Bot")).rejects.toThrow(/box naming failed/);
     } finally {
       mutateConfigAfterCreate = null;
     }

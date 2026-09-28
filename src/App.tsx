@@ -30,6 +30,7 @@ import { LocalVmWorkspace } from "@/components/LocalVmWorkspace";
 import { TeamMapPage } from "@/components/TeamMapPage";
 import { setLocale } from "@/lib/i18n";
 import { shouldOpenKeyboardShortcuts } from "@/lib/keyboard-shortcuts";
+import { effectiveLanguage, useLanguageChoice } from "@/lib/language-preference";
 
 function Shell() {
   const { state, dispatch } = useStore();
@@ -64,10 +65,10 @@ function Shell() {
   // turn the aside into a containing block for its fixed descendants (see
   // Sidebar.tsx's className comment).
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // Apply the configured UI language the moment config arrives or changes;
-  // "" follows the system. The epoch bump re-renders extracted strings —
-  // t() reads a module variable, so React needs this nudge.
-  const language = state.config?.language ?? "";
+  // Apply this device's language, else the server's default, the moment
+  // either changes; "" follows the system. The epoch bump re-renders
+  // extracted strings — t() reads a module variable, so React needs this nudge.
+  const language = effectiveLanguage(useLanguageChoice(), state.config?.language);
   const [, setLocaleEpoch] = useState(0);
   useEffect(() => {
     setLocale(language || globalThis.navigator?.language);

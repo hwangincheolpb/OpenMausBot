@@ -1,4 +1,4 @@
-// Box agent contract tests against a scripted fake of boat.dev's box HTTP
+// Boat agent contract tests against a scripted fake of boat.dev's boat HTTP
 // API. The driver polls events + prompt status; the fake advances one poll
 // per GET so we can assert message → tool → message order without sleeping.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,17 +6,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ensureDirs } from "../config.ts";
 import type { ProviderInstance, RuntimeEvent } from "../contracts.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
-import { BoxAgentDriver } from "./boxagent.ts";
+import { BoatAgentDriver } from "./boatagent.ts";
 import { OMB_ASK_TOOL } from "../../shared/ask-question.ts";
 
-const BOX = "box-1";
+const BOAT = "boat-1";
 const PROMPT = "p1";
 
-/** A fenced omb-ask block exactly as the prompt contract tells the box to
+/** A fenced omb-ask block exactly as the prompt contract tells the boat to
  * write one. */
 const askBlock = (questions: unknown[]) => "```omb-ask\n" + JSON.stringify({ questions }) + "\n```";
 
-/** JSON Response helper for the in-process Box HTTP fake. */
+/** JSON Response helper for the in-process Boat HTTP fake. */
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -24,9 +24,9 @@ function json(body: unknown, status = 200) {
 type Poll = { events: unknown[]; status?: { promptRun: { status: string; result?: string } } };
 
 /** Stub fetch so each GET /events + /prompts pair advances one poll in `script`.
- * Posted prompt bodies land in `prompts` so tests can assert what the box
+ * Posted prompt bodies land in `prompts` so tests can assert what the boat
  * was told — the ask contract and the answer continuation. */
-function installFakeBox(script: Poll[], prompts: string[] = []) {
+function installFakeBoat(script: Poll[], prompts: string[] = []) {
   let i = 0;
   const previous = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
@@ -54,18 +54,18 @@ function installFakeBox(script: Poll[], prompts: string[] = []) {
   };
 }
 
-const computer = { boxId: BOX, token: "box-test-token" };
+const computer = { boxId: BOAT, token: "boat-test-token" };
 
-describe("BoxAgentDriver turns (fake API)", () => {
+describe("BoatAgentDriver turns (fake API)", () => {
   let instance: ProviderInstance;
   let recorder: EventRecorder;
   let restoreFetch: (() => void) | undefined;
 
   const create = async (configExtra: { askTimeoutMs?: number } = {}) => {
-    instance = await BoxAgentDriver.create({
+    instance = await BoatAgentDriver.create({
       instanceId: "box-test",
-      displayName: "Box Test",
-      environment: { BOX_TOKEN: "box-test-token" },
+      displayName: "Boat Test",
+      environment: { BOX_TOKEN: "boat-test-token" },
       enabled: true,
       config: { pollMs: 0, ...configExtra },
     });
@@ -84,7 +84,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   });
 
   it("flushes prefix-grown text before a tool, then the tail at settle", async () => {
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       {
         events: [{ id: "e1", type: "response", text: "hel" }],
         status: { promptRun: { status: "running" } },
@@ -116,7 +116,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   });
 
   it("keeps a non-prefix response after a flush instead of slicing it away", async () => {
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       {
         events: [{ id: "e1", type: "response", text: "before" }],
         status: { promptRun: { status: "running" } },
@@ -159,7 +159,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   });
 
   it("ingests a non-prefix prompt result when events already set lastText", async () => {
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       {
         events: [{ id: "e1", type: "response", text: "before" }],
         status: { promptRun: { status: "running" } },
@@ -190,7 +190,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   });
 
   it("flushes pending assistant text when the turn is interrupted", async () => {
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       {
         events: [{ id: "e1", type: "response", text: "half" }],
         status: { promptRun: { status: "running" } },
@@ -217,7 +217,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
     const askText = "Working.\n\n" + askBlock([
       { question: "Ship the release?", header: "Release", options: [{ label: "Ship now" }, { label: "Wait" }] },
     ]);
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "running" } } },
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "finished", result: askText } } },
       { events: [{ id: "c1", type: "response", text: "Shipped." }], status: { promptRun: { status: "finished", result: "Shipped." } } },
@@ -263,7 +263,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
 
   it("does not open a held ask when the turn is interrupted before settle", async () => {
     const askText = "Working.\n\n" + askBlock([{ question: "Proceed?" }]);
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "running" } } },
     ]);
     await create({ askTimeoutMs: 60_000 });
@@ -299,7 +299,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
         const nth = calls.push("prompt");
         if (nth === 2) {
           // the continuation POST hangs until the test releases it, holding
-          // the exact window where Stop lands on an idle box
+          // the exact window where Stop lands on an idle boat
           markStarted();
           await gate;
           calls.push("gate-open");
@@ -331,7 +331,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
     const done = await recorder.until((e) => e.type === "turn.completed");
     expect(done).toMatchObject({ ok: false, stopReason: "interrupted" });
     // the guard interrupted the run that started after Stop, not just the
-    // pre-continuation box
+    // pre-continuation boat
     // the guard interrupted the run that started after Stop: the final call
     // is an interrupt that landed after the continuation POST resolved
     expect(calls[calls.length - 1]).toBe("interrupt");
@@ -341,7 +341,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   it("does not reopen a question after the remote run was cancelled", async () => {
     const askText = askBlock([{ question: "Proceed?" }]);
     const prompts: string[] = [];
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "cancelled" } } },
     ], prompts);
     await create({ askTimeoutMs: 50 });
@@ -354,7 +354,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
 
   it("resolves a held ask on its timeout and completes the turn", async () => {
     const askText = askBlock([{ question: "Proceed?" }]);
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "running" } } },
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "finished", result: askText } } },
     ]);
@@ -369,7 +369,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   it("folds a malformed block's correction into the next prompt instead of losing the ask silently", async () => {
     const prompts: string[] = [];
     const badText = "Done.\n\n```omb-ask\n{not json\n```";
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "m1", type: "response", text: badText }], status: { promptRun: { status: "running" } } },
       { events: [{ id: "m1", type: "response", text: badText }], status: { promptRun: { status: "finished", result: badText } } },
       { events: [], status: { promptRun: { status: "finished", result: "Asked again." } } },
@@ -392,7 +392,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   it("caps an over-limit block at six questions rather than refusing it", async () => {
     const prompts: string[] = [];
     const askText = askBlock(Array.from({ length: 7 }, (_, i) => ({ question: "Question " + (i + 1) + "?" })));
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "running" } } },
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "finished", result: askText } } },
     ], prompts);
@@ -409,7 +409,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
 
   it("shows only the first block when a reply carries two", async () => {
     const askText = "Hi.\n\n" + askBlock([{ question: "First?" }]) + "\n\n" + askBlock([{ question: "Second?" }]);
-    restoreFetch = installFakeBox([
+    restoreFetch = installFakeBoat([
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "running" } } },
       { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "finished", result: askText } } },
     ]);
@@ -426,7 +426,7 @@ describe("BoxAgentDriver turns (fake API)", () => {
   });
 
   it("answers nothing when no ask is held", async () => {
-    restoreFetch = installFakeBox([{ events: [], status: { promptRun: { status: "running" } } }]);
+    restoreFetch = installFakeBoat([{ events: [], status: { promptRun: { status: "running" } } }]);
     await create();
     expect(await instance.adapter.respondToRequest("t-none", "whatever", { behavior: "answer", message: "hi" })).toBe("unavailable");
   });

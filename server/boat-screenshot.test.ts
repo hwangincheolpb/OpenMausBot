@@ -3,7 +3,7 @@
 // unreadable in the panel and in the chat's image viewer.
 import { describe, expect, it } from "vitest";
 
-import { PANEL_FRAME_QUALITY, PANEL_FRAME_WIDTH, panelShotCommand } from "./box.ts";
+import { PANEL_FRAME_QUALITY, PANEL_FRAME_WIDTH, panelShotCommand } from "./boat.ts";
 
 describe("cloud panel frame capture", () => {
   it("captures at 1080p-class width and legible JPEG quality", () => {

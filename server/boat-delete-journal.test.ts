@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const MODULE_URL = pathToFileURL(join(process.cwd(), "server", "box-delete-journal.ts")).href;
+const MODULE_URL = pathToFileURL(join(process.cwd(), "server", "boat-delete-journal.ts")).href;
 const OPERATION_ID = "bdop_0123456789abcdef0123456789abcdef";
 
 function operation(
@@ -47,7 +47,7 @@ async function expectCleanExit(subject: ReturnType<typeof worker>, label: string
   expect({ code, signal, stderr: subject.stderr() }, label).toEqual({ code: 0, signal: null, stderr: "" });
 }
 
-describe("Box deletion journal", () => {
+describe("Boat deletion journal", () => {
   let dataDir: string;
 
   beforeEach(() => {
@@ -63,8 +63,8 @@ describe("Box deletion journal", () => {
   });
 
   it("persists a prepared target across a module restart without credentials", async () => {
-    let journal = await import("./box-delete-journal.ts");
-    const prepared = journal.prepareBoxDeletion({
+    let journal = await import("./boat-delete-journal.ts");
+    const prepared = journal.prepareBoatDeletion({
       boxId: "bx_23456789",
       name: "ogb-0123456789ab-owner-abcdef",
       ownerBotId: "owner-bot",
@@ -76,10 +76,10 @@ describe("Box deletion journal", () => {
     });
 
     vi.resetModules();
-    journal = await import("./box-delete-journal.ts");
-    expect(journal.getBoxDeletion("bx_23456789")).toEqual(prepared);
-    expect(journal.isBoxDeletionPending("bx_23456789")).toBe(true);
-    expect(journal.hasPendingBoxDeletionForBot("owner-bot")).toBe(true);
+    journal = await import("./boat-delete-journal.ts");
+    expect(journal.getBoatDeletion("bx_23456789")).toEqual(prepared);
+    expect(journal.isBoatDeletionPending("bx_23456789")).toBe(true);
+    expect(journal.hasPendingBoatDeletionForBot("owner-bot")).toBe(true);
 
     const path = join(dataDir, "box-delete-requests.json");
     const stored = readFileSync(path, "utf8");
@@ -90,94 +90,94 @@ describe("Box deletion journal", () => {
   });
 
   it("advances a target-bound operation monotonically and retires idempotently", async () => {
-    const journal = await import("./box-delete-journal.ts");
-    journal.prepareBoxDeletion({ boxId: "bx_23456789", name: "owned-box", ownerBotId: "owner-bot" });
+    const journal = await import("./boat-delete-journal.ts");
+    journal.prepareBoatDeletion({ boxId: "bx_23456789", name: "owned-boat", ownerBotId: "owner-bot" });
 
-    const pending = journal.markBoxDeletionAccepted("bx_23456789", operation());
+    const pending = journal.markBoatDeletionAccepted("bx_23456789", operation());
     expect(pending).toMatchObject({ phase: "accepted", operationId: OPERATION_ID, status: "pending" });
-    const processing = journal.markBoxDeletionAccepted("bx_23456789", operation("bx_23456789", "processing"));
+    const processing = journal.markBoatDeletionAccepted("bx_23456789", operation("bx_23456789", "processing"));
     expect(processing.status).toBe("processing");
 
     // An eventually-consistent provider response must not move the fence back.
-    expect(journal.markBoxDeletionAccepted("bx_23456789", operation()).status).toBe("processing");
-    const completed = journal.markBoxDeletionAccepted("bx_23456789", operation("bx_23456789", "completed"));
+    expect(journal.markBoatDeletionAccepted("bx_23456789", operation()).status).toBe("processing");
+    const completed = journal.markBoatDeletionAccepted("bx_23456789", operation("bx_23456789", "completed"));
     expect(completed.status).toBe("completed");
-    expect(journal.listBoxDeletions()).toEqual([completed]);
+    expect(journal.listBoatDeletions()).toEqual([completed]);
 
-    const snapshot = journal.boxDeletionSnapshot();
+    const snapshot = journal.boatDeletionSnapshot();
     snapshot[0]!.name = "mutated outside";
-    expect(journal.getBoxDeletion("bx_23456789")?.name).toBe("owned-box");
+    expect(journal.getBoatDeletion("bx_23456789")?.name).toBe("owned-boat");
 
-    journal.retireBoxDeletion("bx_23456789");
-    journal.retireBoxDeletion("bx_23456789");
-    expect(journal.boxDeletionSnapshot()).toEqual([]);
+    journal.retireBoatDeletion("bx_23456789");
+    journal.retireBoatDeletion("bx_23456789");
+    expect(journal.boatDeletionSnapshot()).toEqual([]);
   });
 
   it("records a block, keeps the target fenced, and supports an explicit deletion retry", async () => {
-    const journal = await import("./box-delete-journal.ts");
+    const journal = await import("./boat-delete-journal.ts");
     const identity = { boxId: "bx_23456789", name: "orphan-box", ownerBotId: null };
-    journal.prepareBoxDeletion(identity);
-    journal.markBoxDeletionAccepted("bx_23456789", operation());
-    const blocked = journal.markBoxDeletionBlocked(
+    journal.prepareBoatDeletion(identity);
+    journal.markBoatDeletionAccepted("bx_23456789", operation());
+    const blocked = journal.markBoatDeletionBlocked(
       "bx_23456789",
       operation("bx_23456789", "blocked"),
     );
     expect(blocked).toMatchObject({ phase: "blocked", operationId: OPERATION_ID, status: "blocked" });
-    expect(journal.isBoxDeletionPending("bx_23456789")).toBe(true);
+    expect(journal.isBoatDeletionPending("bx_23456789")).toBe(true);
 
-    const retried = journal.prepareBoxDeletion(identity);
+    const retried = journal.prepareBoatDeletion(identity);
     expect(retried).toMatchObject({ ...identity, phase: "prepared" });
     expect(retried).not.toHaveProperty("operationId");
     expect(retried).not.toHaveProperty("status");
-    expect(journal.isBoxDeletionPending("bx_23456789")).toBe(true);
+    expect(journal.isBoatDeletionPending("bx_23456789")).toBe(true);
   });
 
   it("refuses identity conflicts and non-target-bound provider receipts", async () => {
-    const journal = await import("./box-delete-journal.ts");
-    journal.prepareBoxDeletion({ boxId: "bx_23456789", name: "owned-box", ownerBotId: "owner-bot" });
+    const journal = await import("./boat-delete-journal.ts");
+    journal.prepareBoatDeletion({ boxId: "bx_23456789", name: "owned-boat", ownerBotId: "owner-bot" });
 
-    expect(() => journal.prepareBoxDeletion({
+    expect(() => journal.prepareBoatDeletion({
       boxId: "bx_23456789",
       name: "renamed-box",
       ownerBotId: "owner-bot",
     })).toThrow(/conflicted/i);
-    expect(() => journal.markBoxDeletionAccepted(
+    expect(() => journal.markBoatDeletionAccepted(
       "bx_23456789",
       operation("bx_3456789a"),
     )).toThrow(/mismatched/i);
-    expect(() => journal.markBoxDeletionAccepted("bx_23456789", {
+    expect(() => journal.markBoatDeletionAccepted("bx_23456789", {
       ...operation(),
       kind: "workspace",
     })).toThrow(/mismatched/i);
-    expect(() => journal.markBoxDeletionAccepted("bx_23456789", {
+    expect(() => journal.markBoatDeletionAccepted("bx_23456789", {
       ...operation(),
       id: "operation-not-provider-shaped",
     })).toThrow(/mismatched/i);
 
-    journal.markBoxDeletionAccepted("bx_23456789", operation());
-    expect(() => journal.markBoxDeletionAccepted("bx_23456789", {
+    journal.markBoatDeletionAccepted("bx_23456789", operation());
+    expect(() => journal.markBoatDeletionAccepted("bx_23456789", {
       ...operation(),
       id: "bdop_ffffffffffffffffffffffffffffffff",
     })).toThrow(/another deletion operation/i);
 
-    journal.prepareBoxDeletion({ boxId: "bx_3456789a", name: "second-box", ownerBotId: null });
-    expect(() => journal.markBoxDeletionAccepted("bx_3456789a", operation("bx_3456789a")))
+    journal.prepareBoatDeletion({ boxId: "bx_3456789a", name: "second-box", ownerBotId: null });
+    expect(() => journal.markBoatDeletionAccepted("bx_3456789a", operation("bx_3456789a")))
       .toThrow(/another deletion operation/i);
   });
 
   it("rejects invalid targets before writing state", async () => {
-    const journal = await import("./box-delete-journal.ts");
-    expect(() => journal.prepareBoxDeletion({
+    const journal = await import("./boat-delete-journal.ts");
+    expect(() => journal.prepareBoatDeletion({
       boxId: "../../config.json",
       name: "box",
       ownerBotId: null,
     })).toThrow(/invalid cloud computer id/i);
-    expect(() => journal.prepareBoxDeletion({
+    expect(() => journal.prepareBoatDeletion({
       boxId: "bx_23456789",
       name: "bad\nname",
       ownerBotId: null,
     })).toThrow(/invalid cloud computer name/i);
-    expect(() => journal.prepareBoxDeletion({
+    expect(() => journal.prepareBoatDeletion({
       boxId: "bx_23456789",
       name: "box",
       ownerBotId: "bad owner",
@@ -186,11 +186,11 @@ describe("Box deletion journal", () => {
   });
 
   it("fails closed on malformed or duplicate persisted authority", async () => {
-    const journal = await import("./box-delete-journal.ts");
-    journal.prepareBoxDeletion({ boxId: "bx_23456789", name: "owned-box", ownerBotId: "owner-bot" });
+    const journal = await import("./boat-delete-journal.ts");
+    journal.prepareBoatDeletion({ boxId: "bx_23456789", name: "owned-boat", ownerBotId: "owner-bot" });
     const path = join(dataDir, "box-delete-requests.json");
     writeFileSync(path, "{ truncated\n");
-    expect(() => journal.boxDeletionSnapshot()).toThrow(/recovery state is unreadable/i);
+    expect(() => journal.boatDeletionSnapshot()).toThrow(/recovery state is unreadable/i);
     expect(readFileSync(path, "utf8")).toBe("{ truncated\n");
 
     const now = Date.now();
@@ -208,17 +208,17 @@ describe("Box deletion journal", () => {
       { ...duplicate, boxId: "bx_23456789" },
       duplicate,
     ] })}\n`);
-    expect(() => journal.boxDeletionSnapshot()).toThrow(/recovery state is invalid/i);
+    expect(() => journal.boatDeletionSnapshot()).toThrow(/recovery state is invalid/i);
   });
 
   it("serializes independent processes without losing either prepared deletion", async () => {
     const concurrentDir = mkdtempSync(join(tmpdir(), "omb-box-delete-processes-"));
     const source = (boxId: string, name: string) => `
       const journal = await import(${JSON.stringify(MODULE_URL)});
-      journal.boxDeletionSnapshot();
+      journal.boatDeletionSnapshot();
       process.stdout.write("ready\\n");
       process.stdin.once("data", () => {
-        const result = journal.prepareBoxDeletion({
+        const result = journal.prepareBoatDeletion({
           boxId: ${JSON.stringify(boxId)},
           name: ${JSON.stringify(name)},
           ownerBotId: null,
@@ -264,7 +264,7 @@ describe("Box deletion journal", () => {
     }));
     const source = `
       const journal = await import(${JSON.stringify(MODULE_URL)});
-      const result = journal.prepareBoxDeletion({
+      const result = journal.prepareBoatDeletion({
         boxId: "bx_23456789",
         name: "stale-lock-box",
         ownerBotId: null,
@@ -285,8 +285,8 @@ describe("Box deletion journal", () => {
   it("does not overwrite a corrupt lock", async () => {
     const lockPath = join(dataDir, "box-delete-requests.lock");
     writeFileSync(lockPath, "not-json\n");
-    const journal = await import("./box-delete-journal.ts");
-    expect(() => journal.boxDeletionSnapshot()).toThrow(/recovery state is lock is invalid/i);
+    const journal = await import("./boat-delete-journal.ts");
+    expect(() => journal.boatDeletionSnapshot()).toThrow(/recovery state is lock is invalid/i);
     expect(readFileSync(lockPath, "utf8")).toBe("not-json\n");
   });
 });

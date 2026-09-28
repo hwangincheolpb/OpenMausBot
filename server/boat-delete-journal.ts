@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
+// Persisted journal filenames keep their historical box-* names.
 const FILE = join(DATA_DIR, "box-delete-requests.json");
 const LOCK_FILE = join(DATA_DIR, "box-delete-requests.lock");
 const MAX_RECORDS = 4_096;
@@ -13,40 +14,40 @@ const LOCK_RETRY_MS = 20;
 const MAX_REAPER_GENERATIONS = 128;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BOT_ID = /^[A-Za-z0-9_-]{1,120}$/;
-const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const BOAT_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const OPERATION_ID = /^bdop_[a-f0-9]{32}$/;
 const PROVIDER_STATUSES = new Set(["pending", "processing", "blocked", "completed"]);
 
-export type BoxDeletionPhase = "prepared" | "accepted" | "blocked";
-export type BoxDeletionStatus = "pending" | "processing" | "blocked" | "completed";
+export type BoatDeletionPhase = "prepared" | "accepted" | "blocked";
+export type BoatDeletionStatus = "pending" | "processing" | "blocked" | "completed";
 
-export interface BoxDeletionRecord {
+export interface BoatDeletionRecord {
   boxId: string;
   name: string;
   ownerBotId: string | null;
-  phase: BoxDeletionPhase;
+  phase: BoatDeletionPhase;
   operationId?: string;
-  status?: BoxDeletionStatus;
+  status?: BoatDeletionStatus;
   requestedAt: number;
   updatedAt: number;
 }
 
-export interface BoxDeletionIdentity {
+export interface BoatDeletionIdentity {
   boxId: string;
   name: string;
   ownerBotId: string | null;
 }
 
-export interface BoxDeletionOperationReceipt {
+export interface BoatDeletionOperationReceipt {
   id: string;
   kind: "box";
   targetId: string;
-  status: BoxDeletionStatus;
+  status: BoatDeletionStatus;
 }
 
 interface JournalFile {
   version: 1;
-  records: BoxDeletionRecord[];
+  records: BoatDeletionRecord[];
 }
 
 interface JournalLockOwner {
@@ -78,12 +79,12 @@ function validName(value: unknown): value is string {
     && !/[\r\n\0]/.test(value);
 }
 
-function isRecord(value: unknown): value is BoxDeletionRecord {
+function isRecord(value: unknown): value is BoatDeletionRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   if (
     typeof record.boxId !== "string"
-    || !BOX_ID.test(record.boxId)
+    || !BOAT_ID.test(record.boxId)
     || !validName(record.name)
     || !(record.ownerBotId === null || (typeof record.ownerBotId === "string" && BOT_ID.test(record.ownerBotId)))
     || !(["prepared", "accepted", "blocked"] as unknown[]).includes(record.phase)
@@ -106,21 +107,21 @@ function stateError(detail: string, cause?: unknown): Error & { status: number }
   return Object.assign(
     new Error(
       `Cloud computer deletion is paused because its recovery state is ${detail}. `
-      + "Check the Box provider before repairing OpenMausBot's local state.",
+      + "Check the Boat provider before repairing OpenMausBot's local state.",
     ),
     { status: 503, cause },
   );
 }
 
-function clone(record: BoxDeletionRecord): BoxDeletionRecord {
+function clone(record: BoatDeletionRecord): BoatDeletionRecord {
   return { ...record };
 }
 
-function nextUpdatedAt(record: BoxDeletionRecord): number {
+function nextUpdatedAt(record: BoatDeletionRecord): number {
   return Math.max(Date.now(), record.updatedAt);
 }
 
-function loadFresh(): BoxDeletionRecord[] {
+function loadFresh(): BoatDeletionRecord[] {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(FILE, "utf8"));
@@ -140,11 +141,11 @@ function loadFresh(): BoxDeletionRecord[] {
     || !journal.records.every(isRecord)
   ) throw stateError("invalid");
 
-  const boxIds = new Set<string>();
+  const boatIds = new Set<string>();
   const operationIds = new Set<string>();
   for (const record of journal.records) {
-    if (boxIds.has(record.boxId)) throw stateError("invalid");
-    boxIds.add(record.boxId);
+    if (boatIds.has(record.boxId)) throw stateError("invalid");
+    boatIds.add(record.boxId);
     if (record.operationId) {
       if (operationIds.has(record.operationId)) throw stateError("invalid");
       operationIds.add(record.operationId);
@@ -153,7 +154,7 @@ function loadFresh(): BoxDeletionRecord[] {
   return journal.records.map(clone);
 }
 
-function save(records: BoxDeletionRecord[]): void {
+function save(records: BoatDeletionRecord[]): void {
   try {
     mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
     writeFileAtomic(FILE, `${JSON.stringify({ version: 1, records }, null, 2)}\n`, { mode: 0o600 });
@@ -354,7 +355,7 @@ function releaseJournalLock(owner: JournalLockOwner): void {
   }
 }
 
-function withJournalLock<T>(operation: (records: BoxDeletionRecord[]) => T): T {
+function withJournalLock<T>(operation: (records: BoatDeletionRecord[]) => T): T {
   const owner = acquireJournalLock();
   try {
     return operation(loadFresh());
@@ -363,8 +364,8 @@ function withJournalLock<T>(operation: (records: BoxDeletionRecord[]) => T): T {
   }
 }
 
-function validateIdentity(identity: BoxDeletionIdentity): void {
-  if (!BOX_ID.test(identity.boxId)) throw new Error("invalid cloud computer id for deletion");
+function validateIdentity(identity: BoatDeletionIdentity): void {
+  if (!BOAT_ID.test(identity.boxId)) throw new Error("invalid cloud computer id for deletion");
   if (!validName(identity.name)) throw new Error("invalid cloud computer name for deletion");
   if (!(identity.ownerBotId === null || BOT_ID.test(identity.ownerBotId))) {
     throw new Error("invalid cloud computer owner for deletion");
@@ -374,8 +375,8 @@ function validateIdentity(identity: BoxDeletionIdentity): void {
 function parseOperation(
   boxId: string,
   value: unknown,
-  expectedStatus?: BoxDeletionStatus,
-): BoxDeletionOperationReceipt {
+  expectedStatus?: BoatDeletionStatus,
+): BoatDeletionOperationReceipt {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("invalid cloud computer deletion operation");
   }
@@ -389,12 +390,12 @@ function parseOperation(
     || !PROVIDER_STATUSES.has(operation.status)
     || (expectedStatus !== undefined && operation.status !== expectedStatus)
   ) throw new Error("invalid or mismatched cloud computer deletion operation");
-  return operation as unknown as BoxDeletionOperationReceipt;
+  return operation as unknown as BoatDeletionOperationReceipt;
 }
 
 /** Write the immutable target before sending DELETE to the provider. Existing
  * in-flight work wins; a blocked operation may be explicitly retried. */
-export function prepareBoxDeletion(identity: BoxDeletionIdentity): BoxDeletionRecord {
+export function prepareBoatDeletion(identity: BoatDeletionIdentity): BoatDeletionRecord {
   validateIdentity(identity);
   return withJournalLock((records) => {
     const existing = records.find((record) => record.boxId === identity.boxId);
@@ -406,7 +407,7 @@ export function prepareBoxDeletion(identity: BoxDeletionIdentity): BoxDeletionRe
     }
     if (!existing && records.length >= MAX_RECORDS) throw stateError("full");
     const now = Date.now();
-    const prepared: BoxDeletionRecord = {
+    const prepared: BoatDeletionRecord = {
       ...identity,
       phase: "prepared",
       requestedAt: now,
@@ -417,13 +418,13 @@ export function prepareBoxDeletion(identity: BoxDeletionIdentity): BoxDeletionRe
   });
 }
 
-/** Bind a provider receipt to the exact immutable Box target. A caller cannot
- * accidentally attach another Box's operation to this deletion fence. */
-export function markBoxDeletionAccepted(boxId: string, value: unknown): BoxDeletionRecord {
-  if (!BOX_ID.test(boxId)) throw new Error("invalid cloud computer id for deletion");
+/** Bind a provider receipt to the exact immutable Boat target. A caller cannot
+ * accidentally attach another Boat's operation to this deletion fence. */
+export function markBoatDeletionAccepted(boxId: string, value: unknown): BoatDeletionRecord {
+  if (!BOAT_ID.test(boxId)) throw new Error("invalid cloud computer id for deletion");
   const operation = parseOperation(boxId, value);
   if (operation.status === "blocked") {
-    throw new Error("blocked cloud computer deletion must use markBoxDeletionBlocked");
+    throw new Error("blocked cloud computer deletion must use markBoatDeletionBlocked");
   }
   const acceptedStatus = operation.status;
   return withJournalLock((records) => {
@@ -435,7 +436,7 @@ export function markBoxDeletionAccepted(boxId: string, value: unknown): BoxDelet
     if (records.some((record) => record.boxId !== boxId && record.operationId === operation.id)) {
       throw stateError("conflicted with another deletion operation");
     }
-    const ranks: Record<Exclude<BoxDeletionStatus, "blocked">, number> = {
+    const ranks: Record<Exclude<BoatDeletionStatus, "blocked">, number> = {
       pending: 0,
       processing: 1,
       completed: 2,
@@ -446,7 +447,7 @@ export function markBoxDeletionAccepted(boxId: string, value: unknown): BoxDelet
       && existing.status !== "blocked"
       && ranks[acceptedStatus] < ranks[existing.status]
     ) return clone(existing);
-    const accepted: BoxDeletionRecord = {
+    const accepted: BoatDeletionRecord = {
       ...existing,
       phase: "accepted",
       operationId: operation.id,
@@ -461,8 +462,8 @@ export function markBoxDeletionAccepted(boxId: string, value: unknown): BoxDelet
 /** Record an explicit provider block without discarding the target. The
  * target remains fenced from normal use; only a deliberate deletion retry
  * may prepare the same immutable target again. */
-export function markBoxDeletionBlocked(boxId: string, value?: unknown): BoxDeletionRecord {
-  if (!BOX_ID.test(boxId)) throw new Error("invalid cloud computer id for deletion");
+export function markBoatDeletionBlocked(boxId: string, value?: unknown): BoatDeletionRecord {
+  if (!BOAT_ID.test(boxId)) throw new Error("invalid cloud computer id for deletion");
   const operation = value === undefined ? null : parseOperation(boxId, value, "blocked");
   return withJournalLock((records) => {
     const existing = records.find((record) => record.boxId === boxId);
@@ -474,7 +475,7 @@ export function markBoxDeletionBlocked(boxId: string, value?: unknown): BoxDelet
       operation
       && records.some((record) => record.boxId !== boxId && record.operationId === operation.id)
     ) throw stateError("conflicted with another deletion operation");
-    const blocked: BoxDeletionRecord = {
+    const blocked: BoatDeletionRecord = {
       ...existing,
       phase: "blocked",
       ...(operation?.id || existing.operationId ? { operationId: operation?.id ?? existing.operationId } : {}),
@@ -487,33 +488,33 @@ export function markBoxDeletionBlocked(boxId: string, value?: unknown): BoxDelet
 }
 
 /** A fresh, lock-protected copy suitable for server reconciliation. */
-export function boxDeletionSnapshot(): BoxDeletionRecord[] {
+export function boatDeletionSnapshot(): BoatDeletionRecord[] {
   return withJournalLock((records) => records.map(clone));
 }
 
-export const listBoxDeletions = boxDeletionSnapshot;
+export const listBoatDeletions = boatDeletionSnapshot;
 
-export function getBoxDeletion(boxId: string): BoxDeletionRecord | null {
-  if (!BOX_ID.test(boxId)) throw new Error("invalid cloud computer id for deletion");
+export function getBoatDeletion(boxId: string): BoatDeletionRecord | null {
+  if (!BOAT_ID.test(boxId)) throw new Error("invalid cloud computer id for deletion");
   return withJournalLock((records) => {
     const record = records.find((candidate) => candidate.boxId === boxId);
     return record ? clone(record) : null;
   });
 }
 
-export function isBoxDeletionPending(boxId: string): boolean {
-  return getBoxDeletion(boxId) !== null;
+export function isBoatDeletionPending(boxId: string): boolean {
+  return getBoatDeletion(boxId) !== null;
 }
 
-export function hasPendingBoxDeletionForBot(botId: string): boolean {
+export function hasPendingBoatDeletionForBot(botId: string): boolean {
   if (!BOT_ID.test(botId)) throw new Error("invalid bot id for cloud computer deletion");
   return withJournalLock((records) => records.some((record) => record.ownerBotId === botId));
 }
 
 /** Remove a record only after direct absence or a completed target-bound
- * provider operation proves the immutable Box identity is gone. */
-export function retireBoxDeletion(boxId: string): void {
-  if (!BOX_ID.test(boxId)) throw new Error("invalid deleted cloud computer id");
+ * provider operation proves the immutable Boat identity is gone. */
+export function retireBoatDeletion(boxId: string): void {
+  if (!BOAT_ID.test(boxId)) throw new Error("invalid deleted cloud computer id");
   withJournalLock((records) => {
     const next = records.filter((record) => record.boxId !== boxId);
     if (next.length !== records.length) save(next);

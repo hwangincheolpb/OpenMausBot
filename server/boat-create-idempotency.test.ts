@@ -12,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 type Scenario = "lost-response" | "restart-after-5xx" | "in-progress" | "recovered-box";
 
-const JOURNAL_MODULE_URL = pathToFileURL(join(process.cwd(), "server", "box-create-idempotency.ts")).href;
+const JOURNAL_MODULE_URL = pathToFileURL(join(process.cwd(), "server", "boat-create-idempotency.ts")).href;
 
 function journalWorker(dataDir: string, source: string) {
   const child = spawn(process.execPath, [
@@ -50,7 +50,7 @@ async function expectCleanWorkerExit(
   expect({ code, signal, stderr: worker.stderr() }, label).toEqual({ code: 0, signal: null, stderr: "" });
 }
 
-describe("Box create idempotency", () => {
+describe("Boat create idempotency", () => {
   let api: Server;
   let scenario: Scenario = "lost-response";
   let allowRecovery = false;
@@ -59,7 +59,7 @@ describe("Box create idempotency", () => {
   let failDesktop = false;
   const createKeys: string[] = [];
   const renameBodies: unknown[] = [];
-  const deletedBoxes: string[] = [];
+  const deletedBoats: string[] = [];
 
   const boxId = () => scenario === "lost-response"
     ? "bx_23456789"
@@ -69,7 +69,7 @@ describe("Box create idempotency", () => {
 
   beforeAll(async () => {
     api = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://box.test");
+      const url = new URL(req.url ?? "/", "http://boat.test");
       let raw = "";
       req.on("data", (chunk) => (raw += chunk));
       req.on("end", () => {
@@ -122,7 +122,7 @@ describe("Box create idempotency", () => {
           return res.end(JSON.stringify({ ok: true, desktopUrl: "https://desktop.example/session" }));
         }
         if (url.pathname === `/api/box/v1/boxes/${boxId()}` && req.method === "DELETE") {
-          deletedBoxes.push(boxId());
+          deletedBoats.push(boxId());
           res.writeHead(202);
           return res.end(JSON.stringify({ ok: true }));
         }
@@ -141,7 +141,7 @@ describe("Box create idempotency", () => {
     failDesktop = false;
     createKeys.length = 0;
     renameBodies.length = 0;
-    deletedBoxes.length = 0;
+    deletedBoats.length = 0;
   });
 
   afterAll(async () => {
@@ -149,12 +149,12 @@ describe("Box create idempotency", () => {
     await new Promise<void>((resolve) => api.close(() => resolve()));
   });
 
-  it("retries a lost response with the same key and renames the recovered Box", async () => {
+  it("retries a lost response with the same key and renames the recovered Boat", async () => {
     scenario = "lost-response";
     vi.resetModules();
-    const { provisionBox } = await import("./box.ts");
+    const { provisionBoat } = await import("./boat.ts");
 
-    const result = await provisionBox({ box: { token: "box_test" } } as any, "lost-response-bot", "Lost Response");
+    const result = await provisionBoat({ box: { token: "box_test" } } as any, "lost-response-bot", "Lost Response");
 
     expect(result.boxId).toBe("bx_23456789");
     expect(createKeys).toHaveLength(2);
@@ -166,18 +166,18 @@ describe("Box create idempotency", () => {
   it("reuses the durable key after a 5xx and module restart", async () => {
     scenario = "restart-after-5xx";
     vi.resetModules();
-    let { provisionBox } = await import("./box.ts");
+    let { provisionBoat } = await import("./boat.ts");
 
     await expect(
-      provisionBox({ box: { token: "box_test" } } as any, "restart-5xx-bot", "Restart Recovery"),
+      provisionBoat({ box: { token: "box_test" } } as any, "restart-5xx-bot", "Restart Recovery"),
     ).rejects.toThrow(/accepted but response unavailable/);
     expect(createKeys).toHaveLength(2);
     expect(new Set(createKeys).size).toBe(1);
 
     allowRecovery = true;
     vi.resetModules();
-    ({ provisionBox } = await import("./box.ts"));
-    const result = await provisionBox(
+    ({ provisionBoat } = await import("./boat.ts"));
+    const result = await provisionBoat(
       { box: { token: "box_test" } } as any,
       "restart-5xx-bot",
       "Restart Recovery",
@@ -192,33 +192,33 @@ describe("Box create idempotency", () => {
   it("waits for an in-progress idempotent create and keeps the same key", async () => {
     scenario = "in-progress";
     vi.resetModules();
-    const { provisionBox } = await import("./box.ts");
+    const { provisionBoat } = await import("./boat.ts");
 
-    const result = await provisionBox({ box: { token: "box_test" } } as any, "in-progress-bot", "In Progress");
+    const result = await provisionBoat({ box: { token: "box_test" } } as any, "in-progress-bot", "In Progress");
 
     expect(result.boxId).toBe("bx_abcdefgh");
     expect(createKeys).toHaveLength(4);
     expect(new Set(createKeys).size).toBe(1);
   });
 
-  it("never deletes a Box recovered from a previous provisioning attempt", async () => {
+  it("never deletes a Boat recovered from a previous provisioning attempt", async () => {
     scenario = "recovered-box";
     vi.resetModules();
-    let { provisionBox } = await import("./box.ts");
+    let { provisionBoat } = await import("./boat.ts");
 
-    const first = await provisionBox({ box: { token: "box_test" } } as any, "recovered-bot", "Recovered");
+    const first = await provisionBoat({ box: { token: "box_test" } } as any, "recovered-bot", "Recovered");
     expect(first.boxId).toBe("bx_jkmnpqrs");
     expect(createCount).toBe(1);
 
     failDesktop = true;
     vi.resetModules();
-    ({ provisionBox } = await import("./box.ts"));
+    ({ provisionBoat } = await import("./boat.ts"));
     await expect(
-      provisionBox({ box: { token: "box_test" } } as any, "recovered-bot", "Recovered"),
+      provisionBoat({ box: { token: "box_test" } } as any, "recovered-bot", "Recovered"),
     ).rejects.toThrow(/desktop link could not be created/);
 
     expect(createCount).toBe(1);
-    expect(deletedBoxes).toEqual([]);
+    expect(deletedBoats).toEqual([]);
   });
 
   it("fails closed when an ambiguous request has outlived the provider key", async () => {
@@ -227,18 +227,18 @@ describe("Box create idempotency", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(startedAt);
     try {
       vi.resetModules();
-      let { provisionBox } = await import("./box.ts");
+      let { provisionBoat } = await import("./boat.ts");
       await expect(
-        provisionBox({ box: { token: "box_test" } } as any, "expired-5xx-bot", "Expired Recovery"),
+        provisionBoat({ box: { token: "box_test" } } as any, "expired-5xx-bot", "Expired Recovery"),
       ).rejects.toThrow(/accepted but response unavailable/);
       expect(createKeys).toHaveLength(2);
 
       now.mockReturnValue(startedAt + 24 * 60 * 60 * 1_000 + 1);
       allowRecovery = true;
       vi.resetModules();
-      ({ provisionBox } = await import("./box.ts"));
+      ({ provisionBoat } = await import("./boat.ts"));
       await expect(
-        provisionBox({ box: { token: "box_test" } } as any, "expired-5xx-bot", "Expired Recovery"),
+        provisionBoat({ box: { token: "box_test" } } as any, "expired-5xx-bot", "Expired Recovery"),
       ).rejects.toThrow(/older than boat\.dev's 24-hour retry window/i);
 
       expect(createKeys).toHaveLength(2);
@@ -250,73 +250,73 @@ describe("Box create idempotency", () => {
   it("keeps key-only and remembered-ID attempts unresolved until provider naming succeeds", async () => {
     vi.resetModules();
     const {
-      beginBoxCreate,
-      boxCreateRecoverySnapshot,
-      hasUnresolvedBoxCreate,
-      rememberCreatedBox,
-      resolveBoxCreate,
-      retireDeletedBoxCreate,
-    } = await import("./box-create-idempotency.ts");
+      beginBoatCreate,
+      boatCreateRecoverySnapshot,
+      hasUnresolvedBoatCreate,
+      rememberCreatedBoat,
+      resolveBoatCreate,
+      retireDeletedBoatCreate,
+    } = await import("./boat-create-idempotency.ts");
     const botId = "deletion-guard-bot";
-    const attempt = beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+    const attempt = beginBoatCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
 
-    expect(hasUnresolvedBoxCreate(botId)).toBe(true);
-    const pending = boxCreateRecoverySnapshot().find((record) => record.botId === botId);
+    expect(hasUnresolvedBoatCreate(botId)).toBe(true);
+    const pending = boatCreateRecoverySnapshot().find((record) => record.botId === botId);
     expect(pending).toEqual({ botId, resolved: false });
     expect(JSON.stringify(pending)).not.toContain(attempt.request.idempotencyKey);
     expect(JSON.stringify(pending)).not.toContain(attempt.request.requestBody);
-    const remembered = rememberCreatedBox(attempt.request, "bx_3456789a");
-    expect(hasUnresolvedBoxCreate(botId)).toBe(true);
-    expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toEqual({
+    const remembered = rememberCreatedBoat(attempt.request, "bx_3456789a");
+    expect(hasUnresolvedBoatCreate(botId)).toBe(true);
+    expect(boatCreateRecoverySnapshot().find((record) => record.botId === botId)).toEqual({
       botId,
       boxId: "bx_3456789a",
       resolved: false,
     });
 
-    resolveBoxCreate(remembered);
-    expect(hasUnresolvedBoxCreate(botId)).toBe(false);
-    expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toEqual({
+    resolveBoatCreate(remembered);
+    expect(hasUnresolvedBoatCreate(botId)).toBe(false);
+    expect(boatCreateRecoverySnapshot().find((record) => record.botId === botId)).toEqual({
       botId,
       boxId: "bx_3456789a",
       resolved: true,
     });
 
-    retireDeletedBoxCreate("bx_3456789a");
-    expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toBeUndefined();
+    retireDeletedBoatCreate("bx_3456789a");
+    expect(boatCreateRecoverySnapshot().find((record) => record.botId === botId)).toBeUndefined();
   });
 
-  it("adopts the same legacy Box once, supersedes pending state, and refuses conflicting ownership", async () => {
+  it("adopts the same legacy Boat once, supersedes pending state, and refuses conflicting ownership", async () => {
     vi.resetModules();
     const {
-      adoptResolvedBox,
-      beginBoxCreate,
-      boxCreateRecoverySnapshot,
-      hasUnresolvedBoxCreate,
-      retireDeletedBoxCreate,
-    } = await import("./box-create-idempotency.ts");
+      adoptResolvedBoat,
+      beginBoatCreate,
+      boatCreateRecoverySnapshot,
+      hasUnresolvedBoatCreate,
+      retireDeletedBoatCreate,
+    } = await import("./boat-create-idempotency.ts");
     const boxId = "bx_56789abc";
     const botId = "legacy-journal-owner";
     try {
-      beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
-      expect(hasUnresolvedBoxCreate(botId)).toBe(true);
-      adoptResolvedBox(botId, boxId);
-      adoptResolvedBox(botId, boxId);
-      expect(hasUnresolvedBoxCreate(botId)).toBe(false);
-      expect(boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+      beginBoatCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+      expect(hasUnresolvedBoatCreate(botId)).toBe(true);
+      adoptResolvedBoat(botId, boxId);
+      adoptResolvedBoat(botId, boxId);
+      expect(hasUnresolvedBoatCreate(botId)).toBe(false);
+      expect(boatCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
         { botId, boxId, resolved: true },
       ]);
 
-      adoptResolvedBox(botId, "bx_6789abcd");
-      expect(boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+      adoptResolvedBoat(botId, "bx_6789abcd");
+      expect(boatCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
         { botId, boxId: "bx_6789abcd", resolved: true },
       ]);
-      expect(() => adoptResolvedBox("other-legacy-owner", "bx_6789abcd")).toThrow(/another bot/i);
-      expect(boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+      expect(() => adoptResolvedBoat("other-legacy-owner", "bx_6789abcd")).toThrow(/another bot/i);
+      expect(boatCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
         { botId, boxId: "bx_6789abcd", resolved: true },
       ]);
     } finally {
-      retireDeletedBoxCreate(boxId);
-      retireDeletedBoxCreate("bx_6789abcd");
+      retireDeletedBoatCreate(boxId);
+      retireDeletedBoatCreate("bx_6789abcd");
     }
   });
 
@@ -325,10 +325,10 @@ describe("Box create idempotency", () => {
     const requestBody = JSON.stringify({ ttlSeconds: 7_200, noEnv: true });
     const source = `
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
-      journal.hasUnresolvedBoxCreate("multiprocess-primer");
+      journal.hasUnresolvedBoatCreate("multiprocess-primer");
       process.stdout.write("ready\\n");
       process.stdin.once("data", () => {
-        const result = journal.beginBoxCreate("multiprocess-bot", ${JSON.stringify(requestBody)});
+        const result = journal.beginBoatCreate("multiprocess-bot", ${JSON.stringify(requestBody)});
         process.stdout.write(JSON.stringify(result) + "\\n");
       });
     `;
@@ -387,7 +387,7 @@ describe("Box create idempotency", () => {
     }));
     const source = `
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
-      process.stdout.write(JSON.stringify(journal.beginBoxCreate(
+      process.stdout.write(JSON.stringify(journal.beginBoatCreate(
         "stale-lock-bot",
         JSON.stringify({ ttlSeconds: 7200, noEnv: true }),
       )) + "\\n");
@@ -429,7 +429,7 @@ describe("Box create idempotency", () => {
 
     const source = `
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
-      process.stdout.write(JSON.stringify(journal.beginBoxCreate(
+      process.stdout.write(JSON.stringify(journal.beginBoatCreate(
         "dead-reaper-bot",
         JSON.stringify({ ttlSeconds: 7200, noEnv: true }),
       )) + "\\n");
@@ -477,7 +477,7 @@ describe("Box create idempotency", () => {
       const started = performance.now();
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
       try {
-        journal.beginBoxCreate("vanishing-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        journal.beginBoatCreate("vanishing-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
         process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
       } catch (error) {
         process.stdout.write(JSON.stringify({
@@ -540,7 +540,7 @@ describe("Box create idempotency", () => {
       const started = performance.now();
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
       try {
-        journal.beginBoxCreate("replaced-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        journal.beginBoatCreate("replaced-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
         process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
       } catch (error) {
         process.stdout.write(JSON.stringify({
@@ -595,7 +595,7 @@ describe("Box create idempotency", () => {
     const source = `
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
       try {
-        journal.beginBoxCreate("live-reaper-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        journal.beginBoatCreate("live-reaper-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
         process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
       } catch (error) {
         process.stdout.write(JSON.stringify({ error: String(error?.message ?? error) }) + "\\n");
@@ -631,7 +631,7 @@ describe("Box create idempotency", () => {
     const source = `
       const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
       try {
-        journal.beginBoxCreate("corrupt-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        journal.beginBoatCreate("corrupt-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
         process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
       } catch (error) {
         process.stdout.write(JSON.stringify({ error: String(error?.message ?? error) }) + "\\n");

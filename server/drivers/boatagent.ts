@@ -1,11 +1,11 @@
-// Box agent driver — the purest form of the idea: the turn runs ON the
+// Boat agent driver — the purest form of the idea: the turn runs ON the
 // bot's own cloud computer (boat.dev), not on this machine. Uses the
-// Box substrate's native agent facility:
+// Boat substrate's native agent facility:
 //   POST /boxes/{id}/prompt   {provider: codex|claude-code, model, prompt}
 //   GET  /boxes/{id}/prompts/{promptId}    run status
 //   GET  /boxes/{id}/events                work events (polled)
 //   POST /boxes/{id}/interrupt             stop running work
-// The agent has the box's full desktop (Chrome, shell, disk) — the server
+// The agent has the boat's full desktop (Chrome, shell, disk) — the server
 // separately polls screenshots so the chat shows the bot's screen live.
 //
 // The event payload shapes are tolerated liberally and teed verbatim to
@@ -32,9 +32,10 @@ import {
   stripOmbAskBlock,
 } from "../../shared/ask-question.ts";
 
+// "boxAgent" is Boat's historical driver kind (catalog and wire); keep it.
 const DRIVER_KIND = "boxAgent";
 // overridable so tests and a dev backend can be pointed at instead of the live provider
-const BOX_API = process.env.OMB_BOX_API || "https://ascii.dev/api/box/v1";
+const BOAT_API = process.env.OMB_BOX_API || "https://ascii.dev/api/box/v1";
 
 const MODELS = {
   default: "claude-fable-5",
@@ -49,14 +50,14 @@ const MODELS = {
  * does not parse: the marker for "the model tried to ask and failed". */
 const ASK_FENCE_ANY = /(^|\n)[ \t]{0,3}(`{3,}|~{3,})[ \t]*omb-ask\b/;
 
-/** The box runs every harness boat.dev ships (claude-code, codex, pi, opencode,
+/** The boat runs every harness boat.dev ships (claude-code, codex, pi, opencode,
  * prime-agent, kimi). Which one a model id belongs to comes from the public
  * catalog, `GET /api/provider-models` at the API root: an object keyed by
  * harness, each with its `models`. A bot that arrives here from another engine
  * carries that engine's model id, so this is what lets it keep its model. */
 let catalog: Record<string, { models?: Array<{ id?: string }> }> | null = null;
 async function loadCatalog(): Promise<void> {
-  const root = BOX_API.replace(/\/api\/box\/v1\/?$/, "");
+  const root = BOAT_API.replace(/\/api\/box\/v1\/?$/, "");
   catalog = await fetch(`${root}/api/provider-models`, { signal: AbortSignal.timeout(15_000) })
     .then((res) => (res.ok ? res.json() : null))
     .catch(() => null) as typeof catalog;
@@ -70,7 +71,7 @@ const providerFor = (model: string): { provider: string; model: string } => {
   return { provider: model.startsWith("gpt") ? "codex" : "claude-code", model };
 };
 
-export interface BoxAgentConfig {
+export interface BoatAgentConfig {
   pollMs: number;
   /** How long a held omb-ask waits for the person before resolving as a
    * timeout. Overridable so tests can exercise the path without faking the
@@ -78,7 +79,7 @@ export interface BoxAgentConfig {
   askTimeoutMs?: number;
 }
 
-function decodeConfig(raw: unknown): BoxAgentConfig {
+function decodeConfig(raw: unknown): BoatAgentConfig {
   const o = (raw ?? {}) as Record<string, unknown>;
   return {
     pollMs: typeof o.pollMs === "number" ? o.pollMs : 2500,
@@ -86,14 +87,14 @@ function decodeConfig(raw: unknown): BoxAgentConfig {
   };
 }
 
-export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
+export const BoatAgentDriver: ProviderDriver<BoatAgentConfig> = {
   driverKind: DRIVER_KIND,
   metadata: { displayName: "Computer", supportsMultipleInstances: false },
   models: MODELS,
   decodeConfig,
   defaultConfig: () => decodeConfig({}),
 
-  async create(input: DriverCreateInput<BoxAgentConfig>): Promise<ProviderInstance> {
+  async create(input: DriverCreateInput<BoatAgentConfig>): Promise<ProviderInstance> {
     const { instanceId, config } = input;
     const token = input.environment.BOX_TOKEN ?? process.env.BOX_TOKEN ?? "";
     const listeners = new Set<RuntimeEventListener>();
@@ -121,7 +122,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
     });
 
     const api = async (path: string, opts: RequestInit = {}) => {
-      const res = await fetch(`${BOX_API}${path}`, {
+      const res = await fetch(`${BOAT_API}${path}`, {
         ...opts,
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...opts.headers },
         signal: (opts as any).signal ?? AbortSignal.timeout(30_000),
@@ -167,7 +168,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
         });
         appendNative(threadId, { dir: "out", source: "box.prompt", msg: { model, prompt: promptText, response: started } });
         // real shape (2026-08): {type:"prompt.queued", promptId, promptRun:{id,…},
-        // id:<box id>} — never fall back to the bare id, it's the box's
+        // id:<boat id>} — never fall back to the bare id, it's the boat's
         return started?.promptRun?.id ?? started?.prompt?.id ?? started?.promptId ?? null;
       };
       const promptId = await postPrompt(prompt);
@@ -198,7 +199,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
         const seen = new Set<string>();
         let lastText = "";
         let pendingText = "";
-        /** Why the box could not answer (login expired, model refused, …). */
+        /** Why the boat could not answer (login expired, model refused, …). */
         let problem: string | null = null;
         /** Emit unflushed deltas as assistant_text and reset pendingText.
          * The omb-ask block is protocol, not prose: it streamed raw (the
@@ -275,7 +276,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
             return { ok: ok && !cancelled, stopReason: cancelled ? "interrupted" : stopReason };
           }
           // The turn is still open, so this prompt continues it: same turnId,
-          // same accounting, and the answer reaches the box the way the ask
+          // same accounting, and the answer reaches the boat the way the ask
           // contract promised — Q:/A: blocks, capped for echo.
           const continuation = [
             capAnswerEcho(answerWithoutPreamble(reply)),
@@ -284,7 +285,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
           ].join("\n");
           const nextPromptId = await postPrompt(continuation);
           // Stop can land while the continuation POST is in flight: the
-          // interrupt inside cancel() then hits a box with no active run,
+          // interrupt inside cancel() then hits a boat with no active run,
           // and the continuation would start after it. Interrupt the run
           // that just started before ending the turn.
           if (cancelled) {
@@ -294,9 +295,9 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
           return await settleRun(nextPromptId);
         };
 
-        /** Poll one box run to its settle. */
+        /** Poll one boat run to its settle. */
         const settleRun = async (runPromptId: string | null): Promise<{ ok: boolean; stopReason: string | null }> => {
-          const startedAt = Date.now(); // one 30-min ceiling per box run, ask chains included
+          const startedAt = Date.now(); // one 30-min ceiling per boat run, ask chains included
           lastText = "";
           pendingText = "";
           problem = null;
@@ -396,7 +397,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
 
     const snapshot = async (): Promise<ProviderSnapshot> => {
       if (!token) {
-        return { state: "unavailable", reason: 'no Box token — add {"box":{"token":"…"}} to ~/.openmausbot/config.json' };
+        return { state: "unavailable", reason: 'no Boat token — add {"box":{"token":"…"}} to ~/.openmausbot/config.json' };
       }
       try {
         await api("/me");
