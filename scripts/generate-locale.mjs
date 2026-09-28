@@ -26,7 +26,7 @@ const SOURCE_FILE = "en.json";
 const SOURCE_HASH_FILE = "source-hashes.json";
 const LOCALE_CODE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/;
 const PLACEHOLDER = /\{(\w+)\}/g;
-const MODEL_TIMEOUT_MS = 5 * 60 * 1_000;
+const MODEL_TIMEOUT_MS = 30 * 60 * 1_000;
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);

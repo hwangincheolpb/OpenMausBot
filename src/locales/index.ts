@@ -9,6 +9,7 @@ import es from "./es.json";
 import fr from "./fr.json";
 import hi from "./hi.json";
 import ja from "./ja.json";
+import ko from "./ko.json";
 import ptBr from "./pt-br.json";
 import zh from "./zh.json";
 import zhTw from "./zh-tw.json";
@@ -25,6 +26,7 @@ export const locales: Record<string, LocalePack> = {
   fr,
   hi,
   ja,
+  ko,
   // both keys, one pack: pt-BR is the registered dialect, and a plain
   // "pt" system language should land on it rather than English
   pt: ptBr,
@@ -48,6 +50,7 @@ export const localeChoices: ReadonlyArray<{ code: string; label: string }> = [
   { code: "fr", label: "Français" },
   { code: "hi", label: "हिन्दी" },
   { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
   { code: "pt-br", label: "Português (Brasil)" },
   { code: "zh", label: "简体中文" },
   { code: "zh-tw", label: "繁體中文（台灣）" },
